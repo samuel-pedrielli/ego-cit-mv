@@ -11,3 +11,7 @@ Minimal, reproducible toy experiments for MV-CIT (Critique-and-Iterative-Transfo
 ```bash
 pip install torch numpy
 python src/mv_cit_toy.py
+
+## Run in Colab (private repo)
+Because this repository is private, cloning from Colab requires GitHub authentication.
+Recommended: temporarily use a short-lived GitHub token **locally** (do not paste tokens into notebooks you plan to share)
