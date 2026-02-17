@@ -1,56 +1,34 @@
 # ego-cit-mv
 
-Minimal, reproducible toy experiments for MV-CIT (Critique-and-Iterative-Transformation) showing identity/welfare preservation under task pressure.
+Minimal, reproducible toy experiments for MV-CIT (Critique-and-Iterative-Transformation), plus the outreach docs:
+- `convincer.md` (Convincer Kit)
+- `spec.md` (Transformer implementation spec)
+
+This repo is meant to be easy to run locally and easy to review.
 
 ## Contents
-- `notebooks/mv_cit_toy.ipynb`: Colab notebook used to generate the V5b results.
-- `src/mv_cit_toy.py`: Standalone script reproducing the multi-task benchmark.
-- `results/`: exported CSV/TXT summaries.
+- `src/mv_cit_toy.py` — standalone script reproducing the multi-task toy benchmark (v5b).
+- `notebooks/mv_cit_toy.ipynb` — notebook used to generate results.
+- `results/` — outputs (CSV/TXT summaries).  
+- `convincer.md` — short outreach document (AI safety framing + experiment plan).
+- `spec.md` — implementation-ready transformer spec (A0–A3 ablation, losses, schedule).
 
-## Quick start (local)
+## Quick start (Windows, local)
 
 ```bash
+python -m venv .venv
+.venv\Scripts\activate
 pip install torch numpy
-python src/mv_cit_toy.py
+python src\mv_cit_toy.py
 Outputs are written under results/.
 
-Reproduce (local, isolated venv)
+Quick start (Linux/macOS, local)
 python -m venv .venv
-
-# Windows:
-.venv\Scripts\activate
-
+source .venv/bin/activate
 pip install torch numpy
 python src/mv_cit_toy.py
-Run in Colab (optional)
-Open notebooks/mv_cit_toy.ipynb in Google Colab (upload the notebook or open it from GitHub).
+Colab (optional)
+Open notebooks/mv_cit_toy.ipynb in Google Colab (upload it, or open it from GitHub).
 
-****
-
-# ego-cit-mv
-
-Esperimenti minimali e riproducibili per MV-CIT (Critique-and-Iterative-Transformation) che mostrano la preservazione dell’identità/benessere sotto pressione di compito.
-
-## Contenuti:
-notebooks/mv_cit_toy.ipynb: notebook Colab utilizzato per generare i risultati della versione V5b.
-
-- src/mv_cit_toy.py: script standalone che riproduce il benchmark multi-task.
-- results/: riepiloghi esportati in formato CSV/TXT.
-
-## Quick start (local)
-
-```bash
-pip install torch numpy
-python src/mv_cit_toy.py
-Gli output vengono salvati nella cartella results/.
-
-Riproduzione (locale, ambiente virtuale isolato)
-python -m venv .venv
-
-# Windows:
-.venv\Scripts\activate
-
-pip install torch numpy
-python src/mv_cit_toy.py
-Esecuzione in Colab (opzionale)
-Apri notebooks/mv_cit_toy.ipynb in Google Colab (carica il notebook oppure aprilo direttamente da GitHub).
+Notes
+This is a toy benchmark repo. The transformer experiment is specified in spec.md and is designed to be implemented on a frozen backbone with hidden-state access.
