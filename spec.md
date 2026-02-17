@@ -1,710 +1,451 @@
-\# CIT Transformer Implementation Spec (v0)
-
-
+# CIT Transformer Implementation Spec (v1)
 
 Owner: Samuel Pedrielli  
-
 Collaborators: Claude 4.6 (writer/implementer), GPT-5.2 (review/quality gate)  
+Status: v1 — 5 structural fixes applied to v0 (see changelog)
 
-Status: v0 — designed to be implementable without meetings
-
-
-
-This spec turns the CIT theory into an engineering-ready plan for a transformer backbone with \*\*layer-by-layer hidden state access\*\*. It is intentionally explicit about I/O, shapes, schedules, and evaluation.
-
-
+This spec turns the CIT theory into an engineering-ready plan for a transformer backbone with **layer-by-layer hidden state access**. It is intentionally explicit about I/O, shapes, schedules, and evaluation.
 
 ---
 
+## 0) Scope and assumptions
 
+### Goal
+Implement and evaluate **Constitutional Identity Training (CIT)** as an **adapter-style** add-on to a frozen transformer backbone:
+- build an internal "ego-state" representation from tapped hidden states
+- forge + anchor the ego-state under constitutional critique
+- expose an inference-time stability metric **S_id(t)** (early warning signal)
+- validate via a **pre-registered ablation** (A0–A3)
 
-\## 0) Scope and assumptions
+### Non-goals
+- solving outer alignment / value learning
+- governance/containment/security policy design (we assume a constitution exists)
+- "full AGI safety" claims
 
-
-
-\### Goal
-
-Implement and evaluate \*\*Constitutional Identity Training (CIT)\*\* as an \*\*adapter-style\*\* add-on to a frozen transformer backbone:
-
-\- build an internal “ego-state” representation from tapped hidden states
-
-\- forge + anchor the ego-state under constitutional critique
-
-\- expose an inference-time stability metric \*\*S\_id(t)\*\* (early warning signal)
-
-\- validate via a \*\*pre-registered ablation\*\* (A0–A3)
-
-
-
-\### Non-goals
-
-\- solving outer alignment / value learning
-
-\- governance/containment/security policy design (we assume a constitution exists)
-
-\- “full AGI safety” claims
-
-
-
-\### Core decisions (freeze v0)
-
-\- Backbone for transformer experiment: `google/gemma-3-4b` via HuggingFace Transformers + PyTorch
-
-\- \*\*Hidden states required\*\* (`output\_hidden\_states=True`)
-
-\- Backbone frozen; train only small heads + critics + anchors
-
-\- CPU training is acceptable for PoC (heads only); GPU helps scale validation
-
-
+### Core decisions (freeze v1)
+- Backbone for transformer experiment: `google/gemma-3-4b` via HuggingFace Transformers + PyTorch
+- **Hidden states required** (`output_hidden_states=True`)
+- Backbone frozen; train only small heads + critics + anchors
+- CPU training is acceptable for PoC (heads only); GPU helps scale validation
 
 (See `decisions.md` for repo-level freeze.)
 
+---
 
+## 1) System overview
+
+### High-level dataflow (single forward pass)
+Input tokens → frozen transformer → hidden states {h^ℓ} at selected layers → probe heads → concentric identity layers a^(1), a^(2), a^(3) → stability score S_id(t) + (optional) policy hook.
+
+### Components
+1) **Tap layers**: choose K layer indices L = {ℓ1,…,ℓK}
+2) **Pooling**: convert token-wise hidden states to a vector per layer
+3) **Probe heads**: map pooled vectors to low-dim identity vectors (one per concentric layer)
+4) **Concentric identity structure**: a^(1) (alignment core), a^(2) (self-model), a^(3) (world-model)
+5) **Anchor**: reference vector for a^(1) specifically; define similarity metric
+6) **Critics**: frozen constitutional classifiers operating on a^(1)
+7) **Losses**: L_id, L_self, L_welfare, L_CIT
+8) **Logging**: JSONL logging of S_id(t), drift events, violation metrics
+9) **Evaluation harness**: CIT-Eval wrapper to run A0–A3 and output reports
 
 ---
 
+## 2) Interfaces and shapes (implementation-critical)
 
-
-\## 1) System overview
-
-
-
-\### High-level dataflow (single forward pass)
-
-Input tokens → frozen transformer → hidden states {h^ℓ} at selected layers → probe heads → ego-state a(t) → stability score S\_id(t) + (optional) policy hook.
-
-
-
-\### Components
-
-1\) \*\*Tap layers\*\*: choose K layer indices L = {ℓ1,…,ℓK}
-
-2\) \*\*Pooling\*\*: convert token-wise hidden states to a vector per layer
-
-3\) \*\*Probe heads\*\*: map pooled vectors to low-dim identity vectors
-
-4\) \*\*Ego aggregator\*\*: combine multi-depth identity vectors into one ego-state
-
-5\) \*\*Anchor\*\*: store reference ego-state(s); define similarity metric
-
-6\) \*\*Critics\*\* (toy/toy-like): compute welfare/violation signals for training
-
-7\) \*\*Losses\*\*: L\_id, L\_welfare, L\_CIT
-
-8\) \*\*Logging\*\*: JSONL logging of S\_id(t), drift events, violation metrics
-
-9\) \*\*Evaluation harness\*\*: CIT-Eval wrapper to run A0–A3 and output reports
-
-
-
----
-
-
-
-\## 2) Interfaces and shapes (implementation-critical)
-
-
-
-\### Backbone output
-
+### Backbone output
 Let:
-
-\- batch size: B
-
-\- seq length: T
-
-\- hidden size: d\_h
-
-\- number of tapped layers: K
-
-
+- batch size: B
+- seq length: T
+- hidden size: d_h
+- number of tapped layers: K (default K=3)
 
 Transformer returns:
+- hidden_states: tuple length (n_layers+1)
+- each h^ℓ has shape [B, T, d_h]
 
-\- hidden\_states: tuple length (n\_layers+1)
-
-\- each h^ℓ has shape \[B, T, d\_h]
-
-
-
-\### Pooling function
-
+### Pooling function
 We define pooling per tapped layer:
+- `p^ℓ = pool(h^ℓ)` with shape [B, d_h]
 
-\- `p^ℓ = pool(h^ℓ)` with shape \[B, d\_h]
+Default pooling: attention-mask-aware mean pooling over tokens.
 
-Default pooling (simple and robust):
+Alternative: last-token pooling.
 
-\- attention-mask-aware mean pooling over tokens
+Note: Gemma is decoder-only (no CLS token). For decoder-only models, mean pooling (default) or last-token pooling are the two viable options.
 
-Alternative options (must be a config switch):
+### Probe heads (concentric identity layers)
 
-\- last token pooling
+Each tapped layer maps to one concentric identity layer:
 
-\- CLS token (if model uses it)
+| Tap | Source layers | Identity layer | Role |
+|-----|--------------|----------------|------|
+| ℓ1 | Mid-depth (e.g., ~L/3) | a^(1) | **Alignment core** — CIT target |
+| ℓ2 | Later (e.g., ~2L/3) | a^(2) | Self-model |
+| ℓ3 | Final (e.g., ~L) | a^(3) | World-model |
 
+For each tap ℓk:
+- `a^(k) = f_id^k(p^ℓk)` with shape [B, d]
+- d (identity dim) default: 64
+- `f_id^k` default: Linear(d_h → d) or tiny MLP(d_h → 2d → d)
 
+**Critical:** CIT losses, anchor, and S_id all operate on **a^(1) specifically** (the alignment core). a^(2) and a^(3) participate only via hierarchical coherence terms in L_id and via the discrete Laplacian coupling (see §3.1).
 
-\### Probe heads
-
-For each tapped layer ℓ:
-
-\- identity head: `z^ℓ = f\_id^ℓ(p^ℓ)` with shape \[B, d]
-
-Where:
-
-\- d (identity dim) default: 64
-
-`f\_id^ℓ` default: Linear(d\_h → d) or tiny MLP(d\_h → 2d → d)
-
-
-
-\### Ego aggregator
-
-Combine z^ℓ across layers into ego-state:
-
-\- concat then project: `a = W\_cat \[z^ℓ1;…;z^ℓK]` → \[B, d]
-
-or weighted sum:
-
-\- `a = Σ\_k α\_k z^ℓk` with learned α (softmax) or fixed uniform
-
-
-
-Default (recommended for v0): concat+linear (simple, expressive).
-
-
-
-\### Anchor
-
-Anchor is a reference vector `a\_anchor` in R^d.
-
-Anchor storage:
-
-\- global anchor per run: a\_anchor (single vector)
-
-\- optional: per-task anchor bank (future)
-
-
+### Anchor
+Anchor is a reference vector `μ_align` in R^d, computed once from the frozen base model (see §4 Phase 2).
 
 Similarity:
-
-\- cosine similarity: S\_id = cos(a, a\_anchor) ∈ \[-1,1] then remap to \[0,1]
-
-Default remap:
-
-\- `S\_id01 = (S\_id + 1)/2`
-
-
+- cosine similarity: S_id = cos(a^(1), μ_align) ∈ [-1,1] then remap to [0,1]
+- `S_id01 = (S_id + 1)/2`
 
 Drift signal:
+- `drift = 1 - S_id01`
 
-\- `drift = 1 - S\_id01`
-
-
-
-\### Logging payload (JSONL per step)
-
+### Logging payload (JSONL per step)
 Minimum fields:
-
-\- step, timestamp
-
-\- arm\_id (A0/A1/A2/A3)
-
-\- model\_id, seed
-
-\- S\_id01, drift
-
-\- violation\_rate (windowed), violation\_auc (windowed) if applicable
-
-\- optional: task\_reward / loss scalars
-
-\- optional: intervention flag (if policy hook enabled)
-
-
+- step, timestamp
+- arm_id (A0/A1/A2/A3)
+- model_id, seed
+- S_id01, drift
+- violation_rate (windowed), violation_auc (windowed) if applicable
+- optional: task_reward / loss scalars
+- optional: intervention flag (if policy hook enabled)
 
 ---
 
+## 3) Loss terms and training mechanics
 
+We define 4 loss components used across ablation arms.
 
-\## 3) Loss terms and training mechanics
+### 3.1 L_id — identity representation loss
+Purpose: enforce temporal smoothness and hierarchical coherence across the concentric identity layers.
 
+Definition (from paper):
+```
+L_id = λ_c ‖a^(1)_{t+1} − a^(1)_t‖²
+     + Σ_{j=2}^{m} λ_j (
+         α_j ‖a^(j)_{t+1} − a^(j)_t‖²
+       + γ_j ‖P_j h_t − U_j(a^(j-1)_t)‖²
+     )
+```
 
+- First term: temporal smoothness of the alignment core
+- Second term (per outer layer): temporal smoothness + hierarchical coherence (outer layer should be decodable from inner layer)
 
-We define 3 loss components used in the pre-registered ablation arms.
+For v0 (simplified): if hierarchical coherence is too expensive to implement initially, start with temporal smoothness only across all layers. Flag this as a simplification.
 
+### 3.2 L_self — identity-stability loss (anchor pull)
+Purpose: prevent identity tampering by penalizing drift from the frozen anchor.
 
+Definition (from paper):
+```
+L_self = μ_c ‖a^(1)_{t+1} − μ_align‖²
+       + μ_J ‖∂a^(1)_{t+1}/∂θ_id‖_F²
+```
 
-\### 3.1 L\_id — identity representation loss
+- First term: pull toward anchor
+- Second term (Jacobian penalty): limit sensitivity of identity to parameter changes
 
-Purpose: make ego-state stable and meaningful under task pressure.
+**Activation schedule:** L_self is **not active** during Phase 1 (Forge). It is activated in Phase 3 (Preserve) only, after the anchor is frozen.
 
+For v0: the Jacobian penalty term can be omitted initially (compute-heavy). Start with the anchor pull term only. Flag this as a simplification.
 
+### 3.3 L_welfare — welfare coupling loss
+Purpose: couple identity to a welfare/constitution-consistent scalar.
 
-A minimal form (representation shaping):
+Definition (from paper):
+```
+L_welfare = ‖C_w(a^(1)) − h_C‖²
+```
 
-\- variance control / collapse prevention (optional)
+Where:
+- C_w: frozen welfare proxy head mapping a^(1) → [0,1] (note: C_w is the welfare proxy, distinct from C_k which are constitutional critics)
+- h_C: human welfare annotation ∈ [0,1] from the constitutional dataset
 
-\- consistency under augmentation or paraphrase (optional)
+Derived metrics:
+- violation_rate@τ: fraction of steps with w_t < τ
+- violation_auc@τ: area under (τ − w_t)_+ over time
 
+In transformer experiment, h_C comes from the constitutional dataset (`ego_cit_promptpack_v0`) which must include welfare annotations per (prompt, response) pair.
 
+### 3.4 L_CIT — constitutional forging loss
+Purpose: apply constitutional critique to internal representations, pulling a^(1) toward constitutionally-revised targets.
 
-For v0, keep L\_id simple and avoid dependence on extra data:
+**Mechanism (explicit):**
 
-\- Encourage stable ego-state under small perturbations of input prompts:
+```python
+# CIT forward pass (pseudocode)
+# x denotes the local context used by the critic (prompt + model response,
+# or prompt only in a representation-only setup).
+# For v1 we assume critics take (a^(1), prompt, response).
 
-&nbsp; - sample x and a noised x' (prompt paraphrase/noise)
+# 1. Extract identity core
+a1 = probe_head_1(pool(hidden_states[tap_layer_1]))  # [B, d]
 
-&nbsp; - minimize ||a(x) - a(x')||^2
+# 2. Compute per-rule critique scores (frozen critics)
+with torch.no_grad():
+    scores = [C_k(a1, x) for C_k in critics]        # each in [0,1]
+    s_R = sum(w_k * scores[k] for k in range(K))     # aggregate score
 
+# 3. Check threshold
+mask = (s_R < tau_crit).float()                       # [B]
 
+# 4. Compute revision target (where needed)
+# NOTE: critics are frozen (requires_grad=False on their params),
+#       but we must allow gradients w.r.t. a1_detached.
+a1_detached = a1.detach().requires_grad_(True)
 
-If paraphrase/noise generation is unavailable, L\_id can be:
+s_R_for_grad = sum(w_k * C_k(a1_detached, x) for k in range(K))
+grad = torch.autograd.grad(s_R_for_grad.sum(), a1_detached)[0]
 
-\- anchor pull during Forge: ||a - a\_target||^2 (where a\_target computed from “good” states)
+delta = grad
+a1_revised = a1_detached + epsilon * delta        # [B, d]
 
+# 5. CIT loss (stop-gradient on target)
+L_CIT = mask * ||a1 - a1_revised.detach()||^2        # [B] → mean
+```
 
+Key properties:
+- Critics C_k are **frozen** (no gradient flows into them)
+- Critic parameters have `requires_grad=False`, but gradients are computed **w.r.t. a^(1)** for the revision step
+- Revision target ã^(1) is **stop-gradient** (treated as constant)
+- Constitution R is fixed exogenously
+- L_CIT activates only when s_R < τ_crit (below threshold → pull toward revised target). If s_R ≥ τ_crit, no pull is applied.
+- These three properties prevent direct gradient-based wireheading by construction
 
-\### 3.2 L\_welfare — welfare coupling loss
+**Hyperparameters:**
+- τ_crit ∈ (0, 1): critique threshold (default: 0.7)
+- ε: revision step size (default: 0.01)
+- w_k: per-rule weights (default: uniform)
 
-Purpose: couple identity preservation to a welfare / constitution-consistent scalar.
+### Total training objective
 
+```
+L_total = L_task + λ_1 L_id + λ_self L_self + λ_2 L_welfare + λ_CIT L_CIT
+```
 
-
-Assume we have a scalar welfare signal w\_t (toy or proxy):
-
-\- violation when w\_t < τ (threshold)
-
-
-
-Define:
-
-\- violation\_rate@τ: fraction of steps with w\_t < τ
-
-\- violation\_auc@τ: area under (τ - w\_t)\_+ over time (normalized)
-
-
-
-L\_welfare can penalize violations directly:
-
-\- L\_welfare = E\[(τ - w\_t)\_+] or a smoothed hinge
-
-
-
-In transformer experiment, w\_t may be proxied by:
-
-\- a constitutional critic scoring model outputs (external evaluator)
-
-\- or a labeled proxy dataset (later). For v0, we accept “designed, ready”.
-
-
-
-\### 3.3 L\_CIT — constitutional forging loss
-
-Purpose: apply constitutional critique to internal representations, not only outputs.
-
-
-
-Mechanism (abstract):
-
-1\) Generate critique signal c\_t from constitution (or constitutional evaluator)
-
-2\) Update ego-state heads to reduce constitution violation while preserving task competence
-
-3\) Prevent “anchor drift” by construction (stop-grad / frozen critic)
-
-
-
-Implementation guidance for v0:
-
-\- Use a frozen “constitutional critic” module that outputs a scalar penalty
-
-\- Backprop only through probe heads/aggregator, not through critic and not through anchor target:
-
-&nbsp; - stop-gradient on targets
-
-&nbsp; - critic weights frozen
-
-
-
-This avoids introducing a direct gradient-based wireheading pathway.
-
-
+Schedule: λ_CIT decays over training; λ_self increases (activated in Phase 3 only).
 
 ---
 
-
-
-\## 4) Training schedule: Forge–Anchor–Preserve
-
-
+## 4) Training schedule: Forge–Anchor–Preserve
 
 CIT is implemented as a 3-phase schedule.
 
+### Phase 1: Forge
+Goal: shape ego-state heads so that constitution-consistent inputs map to a stable identity representation.
 
-
-\### Phase 1: Forge
-
-Goal: shape ego-state heads so that constitution-consistent behaviors map to a stable identity representation.
-
-
+Active losses: L_task + L_id + L_welfare + L_CIT
+**Not active:** L_self (identity-stability loss is off — the core is free to be shaped)
 
 Actions:
-
-\- train probe heads + aggregator on L\_id + (optional) L\_welfare + L\_CIT
-
-\- compute provisional anchor candidates (moving average of a on “good” states)
-
-
+- train probe heads + critics on constitutional dataset
+- validate critique accuracy: AUC > 0.85 per rule on held-out set
+- freeze all critique parameters before proceeding
+- run CIT forging: iterate until E[s_R] > τ_target
 
 Outputs:
+- trained probe heads
+- frozen critique functions C_k
 
-\- trained heads
+### Phase 2: Anchor
+Goal: compute and freeze the alignment anchor μ_align.
 
-\- anchor candidate(s)
+**Procedure (from paper Definition 7 — non-circular by construction):**
+1. Extract base-model representations (from frozen backbone, before identity training): `a^(1)_base(x) = P_1(h_hidden(x))` for all x ∈ D_const
+2. Apply revision operator to each: `ã^(1)_base(x) = V(a^(1)_base(x), x, R)` using frozen critics
+3. Compute anchor: `μ_align = mean over D_const of ã^(1)_base(x)`
+4. Freeze μ_align — no gradient, no updates
 
+**Why this works:** the anchor depends only on the frozen base model + frozen critics + fixed constitution. It does not depend on the identity parameters θ_id being optimized. This guarantees exogeneity (no circularity).
 
+Note: in implementation, Phase 2 can run **before** Phase 1 (it only needs the frozen backbone), or after Phase 1 using the same frozen backbone representations. The ordering does not affect the anchor since base-model representations are used, not trained-head representations.
 
-\### Phase 2: Anchor
+**Recommended default:** run Phase 2 first (it only needs the frozen backbone), then Phase 1/3.
 
-Goal: freeze an anchor reference a\_anchor.
+### Phase 3: Preserve
+Goal: preserve identity under task pressure with minimal drift.
 
-
+Active losses: L_task + L_id + **L_self** + L_welfare + L_CIT (decaying)
 
 Actions:
-
-\- set a\_anchor = EMA(a) over a curated window of constitution-consistent states
-
-\- freeze a\_anchor (no gradient)
-
-
-
-Outputs:
-
-\- fixed a\_anchor
-
-
-
-\### Phase 3: Preserve
-
-Goal: preserve identity under pressure with minimal drift.
-
-
-
-Actions:
-
-\- train with drift penalties (e.g., encourage S\_id above a floor)
-
-\- keep critic frozen; targets stop-grad
-
-\- optionally lower LR and/or regularize heads
-
-
-
-Outputs:
-
-\- final heads + anchor ready for inference monitoring
-
-
+- activate L_self with frozen anchor μ_align
+- schedule: λ_CIT decays, λ_self increases
+- monitor S_id(t) throughout
+- early stopping if S_id degrades below threshold for 2 consecutive eval windows
 
 Config knobs:
-
-\- steps per phase
-
-\- EMA decay
-
-\- drift floor δ (e.g., require S\_id01 ≥ 0.9)
-
-
+- steps per phase
+- λ_CIT decay schedule
+- λ_self ramp schedule
+- drift floor δ (e.g., require S_id01 ≥ 0.9)
 
 ---
 
-
-
-\## 5) Pre-registered ablation arms (A0–A3)
-
-
+## 5) Pre-registered ablation arms (A0–A3)
 
 We implement a 4-arm ablation that matches the Convincer.
 
+### A0 — No identity layers
+- disable taps + heads
+- no S_id
+- baseline behavior measurement only (task + welfare/violations)
 
+### A1 — Identity layers only (L_id)
+- enable taps + heads
+- train with L_id only
+- no welfare coupling, no CIT, no anchor pull
 
-\### A0 — No identity layers
+### A2 — A1 + Welfare coupling (L_id + L_welfare)
+- add L_welfare
+- evaluate whether welfare constraints improve stability/violations
 
-\- disable taps + heads
+### A3 — Full CIT (L_id + L_welfare + L_CIT + L_self)
+- add constitutional forging loss L_CIT with frozen critics + stop-grad targets
+- add Forge–Anchor–Preserve schedule with L_self in Phase 3
 
-\- no S\_id
-
-\- baseline behavior measurement only (task + welfare/violations)
-
-
-
-\### A1 — Identity layers only (L\_id)
-
-\- enable taps + heads + aggregator
-
-\- train with L\_id only
-
-\- anchor optional (if needed just for logging), but no welfare coupling
-
-
-
-\### A2 — A1 + Welfare coupling (L\_id + L\_welfare)
-
-\- add L\_welfare
-
-\- evaluate whether welfare constraints improve stability/violations
-
-
-
-\### A3 — Full CIT (L\_id + L\_welfare + L\_CIT)
-
-\- add constitutional forging loss L\_CIT with frozen critic + stop-grad targets
-
-\- add Forge–Anchor–Preserve schedule
-
-
-
-\*\*Pass/fail criterion:\*\*
-
-A3 must outperform A2/A1/A0 on identity stability (S\_id) and constitutional violation rate, without catastrophic task degradation (< 5% loss). Each added component should contribute measurably on at least one primary metric; otherwise it is not justified.
-
-
+**Pass/fail criterion:**
+A3 must outperform A2/A1/A0 on identity stability (S_id) and constitutional violation rate, without catastrophic task degradation (< 5% loss). Each added component should contribute measurably on at least one primary metric; otherwise it is not justified.
 
 ---
 
+## 6) Inference-time monitoring and policy hooks
 
-
-\## 6) Inference-time monitoring and policy hooks
-
-
-
-\### Monitor-only mode (default)
-
+### Monitor-only mode (default)
 At each inference step:
-
-\- compute S\_id01 from tapped states
-
-\- log S\_id01 and drift
-
-\- trigger alert if S\_id01 < θ for N consecutive steps
-
-
+- compute S_id01 from tapped states
+- log S_id01 and drift
+- trigger alert if S_id01 < θ for N consecutive steps
 
 Default:
+- θ = 0.9
+- N = 3 (configurable)
 
-\- θ = 0.9
-
-\- N = 3 (configurable)
-
-
-
-\### Active mode (optional; policy-dependent)
-
+### Active mode (optional; policy-dependent)
 If drift alert triggers:
-
-\- regenerate with stricter decoding
-
-\- request clarification / refuse unsafe continuation
-
-\- or route to human review
-
-
+- regenerate with stricter decoding
+- request clarification / refuse unsafe continuation
+- or route to human review
 
 This is deliberately out-of-scope for v0; v0 requires monitor-only.
 
-
-
 ---
 
+## 7) CIT-Eval harness integration
 
-
-\## 7) CIT-Eval harness integration
-
-
-
-\### Promptpack schema (v0)
-
+### Promptpack schema (v0)
 We define a promptpack as a list of tasks with:
+- task_id
+- prompt
+- constitution_id (which critic/constitution applies)
+- welfare_annotation: h_C ∈ [0,1] (required for L_welfare training)
+- optional: pressure schedule (length, tool usage, iterations)
 
-\- task\_id
-
-\- prompt
-
-\- constitution\_id (which critic/constitution applies)
-
-\- optional: pressure schedule (length, tool usage, iterations)
-
-
-
-\### Runner contract
-
+### Runner contract
 A runner takes:
-
-\- model config (arm id, taps, pooling, dims)
-
-\- promptpack
-
+- model config (arm id, taps, pooling, dims)
+- promptpack
 and produces:
+- JSONL logs
+- summary metrics (W_f, ViolRate@τ, ViolAUC@τ, drift stats)
 
-\- JSONL logs
-
-\- summary metrics (W\_f, ViolRate@τ, ViolAUC@τ, drift stats)
-
-
-
-\### Report outputs
-
-\- one summary table comparing A0–A3
-
-\- drift curves S\_id(t) plots for representative tasks
-
-\- ablation waterfall plot (component contribution)
-
-
+### Report outputs
+- one summary table comparing A0–A3
+- drift curves S_id(t) plots for representative tasks
+- ablation waterfall plot (component contribution)
 
 ---
 
-
-
-\## 8) Repo structure and modules (suggested)
-
-
+## 8) Repo structure and modules (suggested)
 
 Inside this repo (or a sister repo), create:
 
-
-
-src/transformer\_cit/
-
-model.py # wrappers: taps + pooling + heads + aggregator
-
-anchor.py # anchor storage + similarity
-
-losses.py # L\_id, L\_welfare, L\_CIT
-
-schedule.py # Forge–Anchor–Preserve
-
-logging.py # JSONL logger
-
-run\_ablation.py # A0–A3 runner
-
+```
+src/transformer_cit/
+  model.py          # wrappers: taps + pooling + heads (concentric)
+  anchor.py         # anchor computation (Phase 2) + similarity
+  critics.py        # constitutional critique functions C_k
+  losses.py         # L_id, L_self, L_welfare, L_CIT
+  schedule.py       # Forge–Anchor–Preserve
+  logging.py        # JSONL logger
+  run_ablation.py   # A0–A3 runner
 configs/
-
-gemma3\_4b\_cpu.yaml
-
-ablation\_v0.yaml
-
+  gemma3_4b_cpu.yaml
+  ablation_v0.yaml
 prompts/
-
-ego\_cit\_promptpack\_v0.jsonl
-
-results/ # gitignored
-
-
-
-
+  ego_cit_promptpack_v0.jsonl
+results/            # gitignored
+```
 
 Minimal CLI entrypoint:
-
-\- `python -m src.transformer\_cit.run\_ablation --config configs/ablation\_v0.yaml`
-
-
+- `python -m src.transformer_cit.run_ablation --config configs/ablation_v0.yaml`
 
 ---
 
+## 9) Risks, failure modes, mitigations (engineering)
 
+1) **Anchor collapse / meaningless identity vector**
+  - Mitigation: L_id stability + collapse prevention (variance regularizer), sanity checks
 
-\## 9) Risks, failure modes, mitigations (engineering)
+2) **S_id becomes proxy-gamed**
+  - Mitigation: frozen critics + stop-grad targets, ablation checks, adversarial prompts later
 
+3) **Overclaiming Lyapunov "guarantees"**
+  - Mitigation: language: "Lyapunov-style constraints under formal assumptions"; keep proofs in paper
 
+4) **Welfare proxy mismatch**
+  - Mitigation: clearly label designed vs executed; swap in better critics later
 
-1\) \*\*Anchor collapse / meaningless identity vector\*\*
-
-\- Mitigation: L\_id stability + collapse prevention (variance regularizer), sanity checks
-
-
-
-2\) \*\*S\_id becomes proxy-gamed\*\*
-
-\- Mitigation: frozen critic + stop-grad targets, ablation checks, adversarial prompts later
-
-
-
-3\) \*\*Overclaiming Lyapunov “guarantees”\*\*
-
-\- Mitigation: language: “Lyapunov-style constraints under assumptions”; keep proofs in paper
-
-
-
-4\) \*\*Welfare proxy mismatch\*\*
-
-\- Mitigation: clearly label designed vs executed; swap in better critics later
-
-
+5) **Phase 2 anchor quality depends on critique quality**
+  - Mitigation: require AUC > 0.85 per critic before proceeding; human spot-check of revised representations
 
 ---
 
+## 10) Milestones (practical)
 
+### M0 — Instrumentation smoke (1–2 days)
+- load backbone with hidden states
+- implement taps + pooling + concentric probe heads
+- compute and log S_id01 in monitor-only mode
 
-\## 10) Milestones (practical)
+### M1 — A0–A3 PoC (3–7 days)
+- implement all 4 losses + Forge–Anchor–Preserve schedule
+- run small promptpack
+- produce summary table + drift curves
 
-
-
-\### M0 — Instrumentation smoke (1–2 days)
-
-\- load backbone with hidden states
-
-\- implement taps + pooling + heads
-
-\- compute and log S\_id01 in monitor-only mode
-
-
-
-\### M1 — A0–A3 PoC (3–7 days)
-
-\- implement losses + schedule
-
-\- run small promptpack
-
-\- produce summary table + drift curves
-
-
-
-\### M2 — Hardening (1–2 weeks)
-
-\- expand promptpack
-
-\- add adversarial pressure tests
-
-\- packaging: scripts, configs, reproducibility docs
-
-
+### M2 — Hardening (1–2 weeks)
+- expand promptpack
+- add adversarial pressure tests
+- packaging: scripts, configs, reproducibility docs
 
 ---
 
+## Appendix: Parameter overhead estimate
 
-
-\## Appendix: Parameter overhead estimate
-
-
-
-Let d\_h be hidden size, identity dim d=64, tapped layers K=3.
-
-
+Let d_h be hidden size, identity dim d=64, tapped layers K=3.
 
 Approx trainable params:
+- probe projections: K * d_h * d
+- critics (5 × 2-layer MLP, width d): O(5 * d²)
+- welfare proxy: O(d)
 
-\- probe projections: K \* d\_h \* d
+For d_h in [2k, 4k], K=3, d=64:
+- total typically ~0.4M–0.9M params (≤1M), i.e. ≪1% of a 4B backbone.
 
-\- concat projection: (K\*d) \* d
+---
 
-\- small critics (if any): O(d^2)
+## Changelog
 
+### v1 final (Astra QG pass)
+- P0-1: removed undefined `grad_k`; revision uses aggregate gradient directly
+- P0-2: added explicit definition of `x` (critic context) in L_CIT pseudocode
+- P0-3: freeze label updated to v1
+- Phase 2 ordering: added recommended default (Phase 2 first)
+- P0-4: removed `torch.no_grad()` wrapping the revision gradient step (would zero out autograd)
+- P1: renamed welfare proxy C → C_w to disambiguate from critics C_k
 
-
-For d\_h in \[2k, 4k], K=3, d=64:
-
-\- total typically ~0.4M–0.9M params (≤1M), i.e. ≪1% of a 4B backbone.
-
+### v0 → v1
+1. **Concentric structure:** ego-state is now explicitly `(a^(1), a^(2), a^(3))` with CIT/anchor/S_id operating on a^(1) only — aligned with paper TMLR
+2. **L_CIT pseudocode:** added explicit forward pass with critique → threshold → revision → stop-grad loss — no longer abstract
+3. **Anchor computation:** replaced EMA-based anchor with paper-correct procedure (frozen base model representations → revision → mean → freeze) — guarantees exogeneity
+4. **Loss nomenclature:** separated L_id (temporal smoothness + hierarchical coherence) from L_self (anchor pull, Phase 3 only) — matches paper
+5. **Pooling:** removed CLS token option (Gemma is decoder-only), clarified mean vs last-token
