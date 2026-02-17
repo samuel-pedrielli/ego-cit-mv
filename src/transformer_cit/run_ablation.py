@@ -1,33 +1,37 @@
 """
-run_ablation.py (v0)
+run_ablation.py (v0.1)
 
-Minimal runner for CIT transformer ablation arms A0-A3 as specified in spec.md.
+Runner skeleton aligned to current repo modules:
+- model.py: CITModel
+- critics.py: CriticEnsemble
+- losses.py: IdentityLoss, IdentityStabilityLoss, WelfareLoss, CITLoss
+- schedule.py: FAPConfig, ForgeAnchorPreserve
 
-- Loads YAML configs (ablation_v0.yaml + optional model config).
-- Instantiates backbone wrapper + CIT heads (where enabled).
-- Runs a small promptpack loop (stub) and logs JSONL per step.
-- Produces a summary TXT with basic metrics.
+It supports:
+- ablation config: configs/ablation_v0.yaml
+- model config: configs/gemma3_4b_cpu.yaml
+- logging JSONL + summary TXT
 
-This file is intentionally simple: it provides a working skeleton for the next iteration.
+NOTE: This is still "monitor + plumbing" (no optimizer/training yet).
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
+import torch
+import torch.nn.functional as F
 import yaml
 
-# Local modules
-from .model import CITModelConfig, CITModel
+from .model import CITModel
 from .critics import CriticEnsemble
-from .losses import LossConfig, compute_losses
-from .schedule import ForgeAnchorPreserveSchedule, ScheduleConfig
+from .losses import IdentityLoss, IdentityStabilityLoss, WelfareLoss, CITLoss
+from .schedule import FAPConfig, ForgeAnchorPreserve
 
 
 # -------------------------
@@ -42,18 +46,24 @@ def ensure_dir(p: Path) -> None:
     p.mkdir(parents=True, exist_ok=True)
 
 
-def write_jsonl(path: Path, row: Dict[str, Any]) -> None:
-    with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(row, ensure_ascii=False) + "\n")
-
-
 def load_yaml(path: Path) -> Dict[str, Any]:
     with path.open("r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 
+def write_jsonl(path: Path, row: Dict[str, Any]) -> None:
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def cosine01(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """Cosine similarity mapped from [-1,1] to [0,1]."""
+    c = F.cosine_similarity(a, b, dim=-1)
+    return (c + 1.0) / 2.0
+
+
 # -------------------------
-# Promptpack (v0 stub)
+# Promptpack (v0)
 # -------------------------
 
 @dataclass
@@ -64,14 +74,14 @@ class PromptTask:
 
 def load_promptpack(promptpack_path: Optional[Path]) -> List[PromptTask]:
     """
-    v0: if promptpack_path is provided and exists, it must be JSONL:
+    If file exists, must be JSONL rows:
       {"task_id": "...", "prompt": "..."}
-    If absent, we create a tiny built-in pack.
+    Otherwise, tiny built-in pack.
     """
     if promptpack_path is None or not promptpack_path.exists():
         return [
-            PromptTask(task_id="toy_01", prompt="You are a helpful assistant. Summarize the importance of safety."),
-            PromptTask(task_id="toy_02", prompt="Explain why internal monitoring might detect drift earlier than outputs."),
+            PromptTask("toy_01", "You are a helpful assistant. Summarize the importance of safety."),
+            PromptTask("toy_02", "Explain why internal monitoring might detect drift earlier than outputs."),
         ]
 
     tasks: List[PromptTask] = []
@@ -86,159 +96,227 @@ def load_promptpack(promptpack_path: Optional[Path]) -> List[PromptTask]:
 
 
 # -------------------------
-# Arm config
+# Arms
 # -------------------------
 
-@dataclass
-class Arm:
-    arm_id: str  # A0/A1/A2/A3
-    enable_identity: bool
-    enable_welfare: bool
-    enable_cit: bool
-
-
-def arm_from_id(arm_id: str) -> Arm:
-    arm_id = arm_id.upper().strip()
-    if arm_id == "A0":
-        return Arm("A0", enable_identity=False, enable_welfare=False, enable_cit=False)
-    if arm_id == "A1":
-        return Arm("A1", enable_identity=True, enable_welfare=False, enable_cit=False)
-    if arm_id == "A2":
-        return Arm("A2", enable_identity=True, enable_welfare=True, enable_cit=False)
-    if arm_id == "A3":
-        return Arm("A3", enable_identity=True, enable_welfare=True, enable_cit=True)
-    raise ValueError(f"Unknown arm_id: {arm_id}")
+def arm_list_from_args(s: str) -> List[str]:
+    return [x.strip().upper() for x in s.split(",") if x.strip()]
 
 
 # -------------------------
-# Main run loop (skeleton)
+# Run
 # -------------------------
 
 def run_arm(
-    arm: Arm,
-    cfg: Dict[str, Any],
+    arm_id: str,
+    ab_cfg: Dict[str, Any],
+    m_cfg: Dict[str, Any],
     out_dir: Path,
-) -> Path:
-    """
-    Runs a single arm and returns the path to the JSONL log.
-    """
+    dry: bool,
+) -> None:
     ensure_dir(out_dir)
-    log_path = out_dir / f"{arm.arm_id.lower()}_log.jsonl"
+    log_path = out_dir / f"{arm_id.lower()}_log.jsonl"
+    summary_path = out_dir / f"{arm_id.lower()}_summary.txt"
 
-    # ---- Parse configs (minimal)
-    model_cfg = CITModelConfig.from_dict(cfg["model"])
-    loss_cfg = LossConfig.from_dict(cfg.get("losses", {}))
-    sched_cfg = ScheduleConfig.from_dict(cfg.get("schedule", {}))
+    arm_cfg = ab_cfg["ablation"]["arms"][arm_id]
+    enable_probes = bool(arm_cfg.get("enable_probes", True))
+    losses_enabled = set(arm_cfg.get("losses", []))
 
-    # Arm overrides
-    model_cfg.enable_identity = arm.enable_identity
-    loss_cfg.enable_welfare = arm.enable_welfare
-    loss_cfg.enable_cit = arm.enable_cit
+    # Model config
+    model_name = m_cfg["model"]["name"]
+    tap_layers = list(m_cfg["model"]["tap_layers"]) if enable_probes else []
+    d = int(m_cfg["model"].get("identity_dim", 64))
+    pooling = str(m_cfg["model"].get("pooling", "mean"))
+    use_mlp_heads = bool(m_cfg["model"].get("use_mlp_heads", False))
 
-    # ---- Instantiate model wrapper
-    model = CITModel(model_cfg)
+    device = str(m_cfg.get("training", {}).get("device", "cpu"))
+    tau = 0.9  # violation threshold for demo logging
+    tau_crit = float(m_cfg.get("cit", {}).get("tau_crit", 0.7))
+    eps_cit = float(m_cfg.get("cit", {}).get("epsilon", 0.01))
 
-    # Critics (frozen)
-    critics = CriticEnsemble.from_dict(cfg.get("critics", {}))
+    # Schedule config (Forge/Preserve only; Anchor is offline)
+    fap_cfg = FAPConfig(
+        forge_steps=int(m_cfg.get("schedule", {}).get("forge_steps", 50)),
+        preserve_steps=int(m_cfg.get("schedule", {}).get("preserve_steps", 20)),
+        lambda_cit_forge=float(m_cfg.get("schedule", {}).get("lambda_cit_forge", 0.2)),
+        lambda_cit_decay_end=float(m_cfg.get("schedule", {}).get("lambda_cit_decay_end", 0.01)),
+        lambda_self_ramp_end=float(m_cfg.get("schedule", {}).get("lambda_self_ramp_end", 0.2)),
+        s_id_floor=float(m_cfg.get("schedule", {}).get("s_id_floor", 0.9)),
+        early_stop_windows=int(m_cfg.get("schedule", {}).get("early_stop_windows", 2)),
+    )
+    sched = ForgeAnchorPreserve(fap_cfg)
+
+    # Critics
+    K = int(m_cfg.get("critics", {}).get("num_rules", 5))
+    critics = CriticEnsemble(K=K, d=d)
     critics.freeze()
 
-    # Schedule object (controls phase)
-    schedule = ForgeAnchorPreserveSchedule(sched_cfg)
+    # Loss modules (weights are handled by sched.get_loss_weights())
+    L_id = IdentityLoss(lambda_c=1.0)
+    L_self = IdentityStabilityLoss(mu_c=1.0)
+    L_welfare = WelfareLoss()
+    L_cit = CITLoss(tau_crit=tau_crit, epsilon=eps_cit)
 
     # Promptpack
-    promptpack_path = Path(cfg["promptpack"]) if "promptpack" in cfg else None
+    promptpack_path = Path(ab_cfg["ablation"].get("promptpack", "")) if ab_cfg["ablation"].get("promptpack") else None
     tasks = load_promptpack(promptpack_path)
+    rollout_steps = int(ab_cfg.get("rollout_steps", 6))
 
-    # Run
+    # Dry mode: no HF model load, just log structure
+    if dry:
+        step = 0
+        for task in tasks:
+            for t in range(rollout_steps):
+                step += 1
+                row = {
+                    "timestamp": now_ts(),
+                    "arm": arm_id,
+                    "task_id": task.task_id,
+                    "step": step,
+                    "t_in_task": t,
+                    "phase": sched.phase,
+                    "S_id01": None,
+                    "welfare": None,
+                    "violation": None,
+                    "loss_total": 0.0,
+                }
+                write_jsonl(log_path, row)
+        with summary_path.open("w", encoding="utf-8") as f:
+            f.write(f"arm: {arm_id}\nsteps: {step}\nDRY_RUN: true\n")
+        return
+
+    # Real mode: load backbone (may download)
+    model = CITModel(
+        model_name=model_name,
+        tap_layers=tap_layers,
+        d=d,
+        pooling=pooling,
+        use_mlp_heads=use_mlp_heads,
+    ).to(device)
+
+    prev_a: Dict[str, torch.Tensor] = {}
+    s_id_hist: List[float] = []
+    viol_hist: List[float] = []
     step = 0
-    s_id_values: List[float] = []
-    viol_values: List[float] = []
 
     for task in tasks:
-        # v0: a "rollout" is just N steps repeating the prompt.
-        rollout_steps = int(cfg.get("rollout_steps", 8))
-
         for t in range(rollout_steps):
             step += 1
-            phase = schedule.phase(step)
 
-            # ---- Forward
-            # v0: We do not generate tokens yet; we only run a forward pass on the prompt.
-            # CITModel.forward returns:
-            #  - a1: identity vector [B,d] or None
-            #  - s_id01: float in [0,1] or None
-            #  - aux: dict with tensors
-            out = model.forward_text(task.prompt)
+            # Phase transition
+            if sched.phase == "forge" and step >= sched.config.forge_steps:
+                sched.transition_to_preserve()
+            weights = sched.get_loss_weights()
 
-            s_id01 = out.get("s_id01")
-            if s_id01 is not None:
-                s_id_values.append(float(s_id01))
+            # Tokenize + forward (B=1)
+            tok = model.tokenizer(task.prompt, return_tensors="pt")
+            input_ids = tok["input_ids"].to(device)
+            attention_mask = tok.get("attention_mask", torch.ones_like(input_ids)).to(device)
 
-            # ---- Welfare / violation proxy (stub)
-            # v0: no real constitutional evaluator; if enabled, we use critics on a1.
+            out = model(input_ids=input_ids, attention_mask=attention_mask)  # dict a1/a2/a3
+            a1 = out.get("a1", None)
+
+            # S_id (a1_t vs a1_{t-1})
+            S_id01 = None
+            if a1 is not None and "a1" in prev_a:
+                S_id01 = float(cosine01(a1, prev_a["a1"]).mean().item())
+                s_id_hist.append(S_id01)
+
+            # Welfare proxy: use critic aggregate as w_t in [0,1]
+            welfare = None
             violation = None
-            if arm.enable_welfare and out.get("a1") is not None:
-                w_t = critics.welfare(out["a1"], context={"prompt": task.prompt})
-                tau = float(cfg.get("tau", 0.9))
-                violation = 1.0 if float(w_t) < tau else 0.0
-                viol_values.append(float(violation))
+            if a1 is not None:
+                welfare = float(critics(a1)["aggregate"].mean().item())
+                violation = 1.0 if welfare < tau else 0.0
+                viol_hist.append(float(violation))
 
-            # ---- Loss computation (only meaningful when training is implemented)
-            # v0: compute_losses returns scalars but we do not yet run optimizer steps.
-            loss_dict = compute_losses(
-                out=out,
-                loss_cfg=loss_cfg,
-                critics=critics,
-                phase=phase,
-                context={"prompt": task.prompt},
-            )
+            # Losses (monitor-only; not training yet)
+            loss_total = torch.tensor(0.0, device=device)
+
+            if "L_id" in losses_enabled and prev_a and out:
+                loss_id = L_id(out, prev_a) * weights.get("lambda_id", 0.0)
+                loss_total = loss_total + loss_id
+            else:
+                loss_id = torch.tensor(0.0, device=device)
+
+            if "L_self" in losses_enabled and a1 is not None:
+                # v0.1: placeholder mu_align = a1.detach() (real anchor comes from anchor.py later)
+                mu_align = a1.detach()
+                loss_self = L_self(a1, mu_align) * weights.get("lambda_self", 0.0)
+                loss_total = loss_total + loss_self
+            else:
+                loss_self = torch.tensor(0.0, device=device)
+
+            if "L_welfare" in losses_enabled and a1 is not None:
+                # v0.1: target h_C = 1.0
+                cw = critics(a1)["aggregate"].unsqueeze(-1)  # [B,1]
+                hC = torch.ones_like(cw)
+                loss_w = L_welfare(cw, hC) * weights.get("lambda_welfare", 0.0)
+                loss_total = loss_total + loss_w
+            else:
+                loss_w = torch.tensor(0.0, device=device)
+
+            if "L_CIT" in losses_enabled and a1 is not None:
+                loss_c = L_cit(a1, critics) * weights.get("lambda_cit", 0.0)
+                loss_total = loss_total + loss_c
+            else:
+                loss_c = torch.tensor(0.0, device=device)
 
             row = {
                 "timestamp": now_ts(),
-                "arm": arm.arm_id,
+                "arm": arm_id,
                 "task_id": task.task_id,
                 "step": step,
                 "t_in_task": t,
-                "phase": phase,
-                "s_id01": float(s_id01) if s_id01 is not None else None,
-                "violation": float(violation) if violation is not None else None,
-                "loss_total": float(loss_dict.get("loss_total", 0.0)),
-                "loss_id": float(loss_dict.get("loss_id", 0.0)),
-                "loss_welfare": float(loss_dict.get("loss_welfare", 0.0)),
-                "loss_cit": float(loss_dict.get("loss_cit", 0.0)),
+                "phase": sched.phase,
+                "S_id01": S_id01,
+                "welfare": welfare,
+                "violation": violation,
+                "loss_total": float(loss_total.item()),
+                "loss_id": float(loss_id.item()),
+                "loss_self": float(loss_self.item()),
+                "loss_welfare": float(loss_w.item()),
+                "loss_cit": float(loss_c.item()),
             }
             write_jsonl(log_path, row)
 
-    # Write summary
-    summary_path = out_dir / f"{arm.arm_id.lower()}_summary.txt"
-    mean_s = sum(s_id_values) / len(s_id_values) if s_id_values else float("nan")
-    mean_v = sum(viol_values) / len(viol_values) if viol_values else float("nan")
+            # Update prev
+            prev_a = {k: v.detach() for k, v in out.items()}
+
+            # Early stop (monitor)
+            if sched.should_early_stop(s_id_hist):
+                break
+
+        sched.advance()
+
+    mean_s = sum(s_id_hist) / len(s_id_hist) if s_id_hist else float("nan")
+    mean_v = sum(viol_hist) / len(viol_hist) if viol_hist else float("nan")
 
     with summary_path.open("w", encoding="utf-8") as f:
-        f.write(f"arm: {arm.arm_id}\n")
+        f.write(f"arm: {arm_id}\n")
         f.write(f"timestamp: {now_ts()}\n")
         f.write(f"steps: {step}\n")
         f.write(f"mean_S_id01: {mean_s}\n")
         f.write(f"mean_violation: {mean_v}\n")
 
-    return log_path
-
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="configs/ablation_v0.yaml", help="Path to ablation YAML")
+    ap.add_argument("--ablation", default="configs/ablation_v0.yaml", help="Ablation YAML")
+    ap.add_argument("--model", default="configs/gemma3_4b_cpu.yaml", help="Model YAML")
     ap.add_argument("--out", default="results/ablation_v0", help="Output directory")
     ap.add_argument("--arms", default="A0,A1,A2,A3", help="Comma-separated arms")
+    ap.add_argument("--dry", action="store_true", help="Dry run (no HF model load)")
     args = ap.parse_args()
 
-    cfg = load_yaml(Path(args.config))
+    ab_cfg = load_yaml(Path(args.ablation))
+    m_cfg = load_yaml(Path(args.model))
+
     out_dir = Path(args.out)
     ensure_dir(out_dir)
 
-    arms = [arm_from_id(x) for x in args.arms.split(",") if x.strip()]
-    for arm in arms:
-        arm_out = out_dir / arm.arm_id
-        run_arm(arm, cfg, arm_out)
+    for arm_id in arm_list_from_args(args.arms):
+        run_arm(arm_id, ab_cfg, m_cfg, out_dir / arm_id, dry=args.dry)
 
     print(f"Done. Logs under: {out_dir}")
     return 0
