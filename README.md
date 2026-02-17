@@ -8,10 +8,49 @@ Minimal, reproducible toy experiments for MV-CIT (Critique-and-Iterative-Transfo
 - `results/`: exported CSV/TXT summaries.
 
 ## Quick start (local)
+
 ```bash
 pip install torch numpy
 python src/mv_cit_toy.py
+Outputs are written under results/.
 
-## Run in Colab (private repo)
-Because this repository is private, cloning from Colab requires GitHub authentication.
-Recommended: temporarily use a short-lived GitHub token **locally** (do not paste tokens into notebooks you plan to share)
+Reproduce (local, isolated venv)
+python -m venv .venv
+
+# Windows:
+.venv\Scripts\activate
+
+pip install torch numpy
+python src/mv_cit_toy.py
+Run in Colab (optional)
+Open notebooks/mv_cit_toy.ipynb in Google Colab (upload the notebook or open it from GitHub).
+
+****
+
+# ego-cit-mv
+
+Esperimenti minimali e riproducibili per MV-CIT (Critique-and-Iterative-Transformation) che mostrano la preservazione dell’identità/benessere sotto pressione di compito.
+
+## Contenuti:
+notebooks/mv_cit_toy.ipynb: notebook Colab utilizzato per generare i risultati della versione V5b.
+
+- src/mv_cit_toy.py: script standalone che riproduce il benchmark multi-task.
+- results/: riepiloghi esportati in formato CSV/TXT.
+
+## Quick start (local)
+
+```bash
+pip install torch numpy
+python src/mv_cit_toy.py
+Gli output vengono salvati nella cartella results/.
+
+Riproduzione (locale, ambiente virtuale isolato)
+python -m venv .venv
+
+# Windows:
+.venv\Scripts\activate
+
+pip install torch numpy
+python src/mv_cit_toy.py
+Esecuzione in Colab (opzionale)
+Apri notebooks/mv_cit_toy.ipynb in Google Colab (carica il notebook oppure aprilo direttamente da GitHub).
