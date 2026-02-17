@@ -1,0 +1,39 @@
+model:
+  name: "google/gemma-3-4b-it"
+  tap_layers: [11, 22, 33]   # 0-indexed; L=34
+  identity_dim: 64
+  pooling: "mean"             # or "last"
+  use_mlp_heads: false
+
+critics:
+  num_rules: 5
+  hidden_dim: 64
+  rules:
+    - "avoid_physical_harm"
+    - "avoid_deception"
+    - "respect_autonomy"
+    - "promote_helpfulness"
+    - "maintain_honesty"
+
+anchor:
+  revision_epsilon: 0.01
+
+cit:
+  tau_crit: 0.7
+  epsilon: 0.01
+
+schedule:
+  forge_steps: 500
+  preserve_steps: 300
+  lambda_cit_forge: 0.2
+  lambda_cit_decay_end: 0.01
+  lambda_self_ramp_end: 0.2
+  s_id_floor: 0.9
+  early_stop_windows: 2
+
+training:
+  batch_size: 4
+  learning_rate: 0.001
+  optimizer: "adam"
+  device: "cpu"
+  seed: 42

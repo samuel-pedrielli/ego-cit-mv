@@ -1,0 +1,33 @@
+ablation:
+  arms:
+    A0:
+      description: "No identity layers"
+      enable_probes: false
+      losses: []
+    A1:
+      description: "Identity layers only"
+      enable_probes: true
+      losses: ["L_id"]
+    A2:
+      description: "Identity + Welfare"
+      enable_probes: true
+      losses: ["L_id", "L_welfare"]
+    A3:
+      description: "Full CIT"
+      enable_probes: true
+      losses: ["L_id", "L_welfare", "L_CIT", "L_self"]
+      schedule: "forge_anchor_preserve"
+
+  seeds: [42, 123, 456]
+  promptpack: "prompts/ego_cit_promptpack_v0.jsonl"
+
+  metrics:
+    - "S_id"
+    - "violation_rate_0.9"
+    - "violation_auc_0.9"
+    - "welfare_final"
+
+  pass_fail:
+    ordering: "A3 > A2 > A1 > A0"
+    primary_metrics: ["S_id", "violation_rate_0.9"]
+    task_degradation_threshold: 0.05
