@@ -1,1 +1,4 @@
-torch>=2.0`ntransformers>=4.40`npyyaml>=6.0`nnumpy>=1.24
+torch>=2.0
+transformers>=4.40
+pyyaml>=6.0
+numpy>=1.24
