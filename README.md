@@ -32,3 +32,19 @@ Open notebooks/mv_cit_toy.ipynb in Google Colab (upload it, or open it from GitH
 
 Notes
 This is a toy benchmark repo. The transformer experiment is specified in spec.md and is designed to be implemented on a frozen backbone with hidden-state access.
+
+## Transformer CIT skeleton (dry smoke)
+
+Install deps (Windows):
+```bash
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+Dry run (no model download):
+
+python -m src.transformer_cit.run_ablation --dry --arms A0 --out results/dry_smoke
+Expected outputs:
+
+results/dry_smoke/A0/a0_log.jsonl
+
+results/dry_smoke/A0/a0_summary.txt
