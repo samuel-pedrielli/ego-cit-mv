@@ -14,6 +14,12 @@ class AnchorStore(nn.Module):
         super().__init__()
         self.register_buffer("mu_align", torch.zeros(d))
         self.frozen = False
+        self._meta = {}
+
+    @property
+    def meta(self) -> dict:
+        """Read-only metadata loaded from the anchor artifact."""
+        return self._meta
 
     @classmethod
     def load_from_file(cls, path: str) -> "AnchorStore":
