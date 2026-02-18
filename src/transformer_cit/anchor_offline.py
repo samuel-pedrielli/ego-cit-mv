@@ -159,6 +159,11 @@ def run_real(config: dict, prompts: list[dict], out_path: str) -> None:
         model_name=model_name, tap_layers=tap_layers,
         d=d, pooling=pooling, use_mlp_heads=use_mlp,
     )
+
+    # Pad token safeguard (decoder-only LMs often have no pad_token by default)
+    if getattr(model, "tokenizer", None) is not None and model.tokenizer.pad_token is None:
+        model.tokenizer.pad_token = model.tokenizer.eos_token
+
     model.eval()
 
     critics = CriticEnsemble(K=K, d=d, frozen=True)
