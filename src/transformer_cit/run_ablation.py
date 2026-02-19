@@ -185,6 +185,7 @@ def run_arm(
                     "t_in_task": t,
                     "phase": sched.phase,
                     "S_id01": None,
+                    "S_id_anchor01": None,
                     "welfare": None,
                     "violation": None,
                     "loss_total": 0.0,
