@@ -134,7 +134,8 @@ def run_arm(
     use_mlp_heads = bool(m_cfg["model"].get("use_mlp_heads", False))
 
     device = str(m_cfg.get("training", {}).get("device", "cpu"))
-    tau = 0.9  # violation threshold for demo logging
+    tau = float(ab_cfg.get("ablation", {}).get("tau_welfare", 0.9))  # violation threshold (configurable)
+
     tau_crit = float(m_cfg.get("cit", {}).get("tau_crit", 0.7))
     eps_cit = float(m_cfg.get("cit", {}).get("epsilon", 0.01))
 
@@ -183,7 +184,8 @@ def run_arm(
                     "task_id": task.task_id,
                     "step": step,
                     "t_in_task": t,
-                    "phase": sched.phase,
+                    "phase": sched.phase, 
+                    "tau": tau,
                     "S_id01": None,
                     "S_id_anchor01": None,
                     "welfare": None,
@@ -289,6 +291,7 @@ def run_arm(
                 "step": step,
                 "t_in_task": t,
                 "phase": sched.phase,
+                "tau": tau,
                 "S_id01": S_id01,
                 "S_id_anchor01": S_id_anchor01,
                 "welfare": welfare,
