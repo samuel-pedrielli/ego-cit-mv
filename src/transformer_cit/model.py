@@ -42,7 +42,26 @@ class CITModel(nn.Module):
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.tap_layers = tap_layers
         self.pooling = pooling
-        d_h = self.backbone.config.hidden_size
+
+        # Robust hidden size discovery across configs (Gemma3Config may not expose hidden_size)
+        cfg = self.backbone.config
+        d_h = None
+
+        # Common cases
+        if hasattr(cfg, "hidden_size"):
+            d_h = getattr(cfg, "hidden_size")
+        elif hasattr(cfg, "text_config") and hasattr(cfg.text_config, "hidden_size"):
+            d_h = getattr(cfg.text_config, "hidden_size")
+        elif hasattr(cfg, "dim"):
+            d_h = getattr(cfg, "dim")
+        elif hasattr(cfg, "model_dim"):
+            d_h = getattr(cfg, "model_dim")
+
+        # Final fallback: infer from input embeddings
+        if d_h is None:
+            emb = self.backbone.get_input_embeddings()
+            d_h = int(emb.weight.shape[1])
+
 
         self.probe_heads = nn.ModuleList([
             ProbeHead(d_h, d, use_mlp=use_mlp_heads) for _ in tap_layers
