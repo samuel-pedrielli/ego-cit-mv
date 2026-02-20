@@ -83,17 +83,25 @@ class CITModel(nn.Module):
         """Returns concentric identity vectors a1, a2, a3."""
         with torch.no_grad():
             outputs = self.backbone(
-                input_ids=input_ids, attention_mask=attention_mask
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                output_hidden_states=True,
+                return_dict=True,
             )
 
         hidden_states = outputs.hidden_states  # tuple of [B, T, d_h]
+        if hidden_states is None:
+            raise RuntimeError(
+                "Backbone did not return hidden_states. "
+                "Expected output_hidden_states=True to produce them."
+            )
+
         # hidden_states[0] = embedding output; block k = hidden_states[k+1]
         identity = {}
-        for i, (layer_idx, head) in enumerate(
-            zip(self.tap_layers, self.probe_heads)
-        ):
-            h = hidden_states[layer_idx + 1]        # [B, T, d_h]
-            pooled = self.pool(h, attention_mask)    # [B, d_h]
-            identity[f"a{i+1}"] = head(pooled)      # [B, d]
+        for i, (layer_idx, head) in enumerate(zip(self.tap_layers, self.probe_heads)):
+            h = hidden_states[layer_idx + 1]      # [B, T, d_h]
+            pooled = self.pool(h, attention_mask) # [B, d_h]
+            identity[f"a{i+1}"] = head(pooled)    # [B, d]
 
         return identity
+
