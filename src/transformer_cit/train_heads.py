@@ -139,7 +139,20 @@ def main() -> None:
     prompts = load_prompts_jsonl(Path(args.prompts))
 
     # Training loop (batch_size=1 to avoid padding overhead on CPU)
-    model.train()
+    # Keep frozen backbone in eval (Gemma3 requires token_type_ids when training)
+model.eval()
+
+    # Train only the probe heads (and small projection layers if present)
+    if hasattr(model, "probe_heads"):
+        for head in model.probe_heads:
+            head.train()
+    for name in ["agg", "aggregator", "proj", "projection", "W_cat"]:
+        if hasattr(model, name):
+            try:
+                getattr(model, name).train()
+        except Exception:
+            pass
+
     mu_b = mu.to(device).unsqueeze(0)  # [1,d]
 
     for step in range(1, args.steps + 1):
