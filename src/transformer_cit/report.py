@@ -45,7 +45,7 @@ def _fmt_mean_std(m: Optional[float], s: Optional[float], nd: int = 4) -> str:
         return "N/A"
     if s is None:
         return f"{m:.{nd}f}"
-    return f"{m:.{nd}f} ± {s:.{nd}f}"
+    return f"{m:.{nd}f} +/- {s:.{nd}f}"
 
 
 @dataclass
