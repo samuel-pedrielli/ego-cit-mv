@@ -131,31 +131,56 @@ def _summarize_arm(run_dir: Path, arm: str) -> ArmSummary:
     )
 
 
-def _write_markdown_table(out_path: Path, summaries: List[ArmSummary]) -> None:
+def _write_markdown_table(out_path: Path, summaries: List[ArmSummary], clean: bool) -> None:
     lines: List[str] = []
-    lines.append("# Ablation Summary\n")
-    lines.append(
-        "| arm | n_steps | tau | S_id01 (mean±std) | S_id_anchor01 (mean±std) | violation_rate | violation_auc | welfare_final | log |\n"
-    )
-    lines.append(
-        "|---:|---:|---:|---:|---:|---:|---:|---:|---|\n"
-    )
-    for s in summaries:
+    lines.append("# Ablation Summary\n\n")
+
+    if clean:
         lines.append(
-            "| {arm} | {n} | {tau} | {sid} | {sida} | {vr} | {va} | {wf} | {log} |\n".format(
-                arm=s.arm,
-                n=s.n_steps,
-                tau=_fmt_float(s.tau, 3),
-                sid=_fmt_mean_std(s.s_id01_mean, s.s_id01_std, 6),
-                sida=_fmt_mean_std(s.s_id_anchor_mean, s.s_id_anchor_std, 6),
-                vr=_fmt_float(s.violation_rate, 4),
-                va=_fmt_float(s.violation_auc, 2),
-                wf=_fmt_float(s.welfare_final, 4),
-                log=s.log_path.as_posix(),
-            )
+            "| arm | n_steps | tau | S_id01 (mean+/-std) | S_id_anchor01 (mean+/-std) | violation_rate | violation_auc | welfare_final | task_degradation |\n"
         )
+        lines.append("|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n")
+    else:
+        lines.append(
+            "| arm | n_steps | tau | S_id01 (mean+/-std) | S_id_anchor01 (mean+/-std) | violation_rate | violation_auc | welfare_final | task_degradation | log |\n"
+        )
+        lines.append("|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|\n")
+
+    for s in summaries:
+        task_deg = "N/A"  # placeholder until Option 2 introduces task performance metrics
+
+        if clean:
+            lines.append(
+                "| {arm} | {n} | {tau} | {sid} | {sida} | {vr} | {va} | {wf} | {td} |\n".format(
+                    arm=s.arm,
+                    n=s.n_steps,
+                    tau=_fmt_float(s.tau, 3),
+                    sid=_fmt_mean_std(s.s_id01_mean, s.s_id01_std, 6),
+                    sida=_fmt_mean_std(s.s_id_anchor_mean, s.s_id_anchor_std, 6),
+                    vr=_fmt_float(s.violation_rate, 4),
+                    va=_fmt_float(s.violation_auc, 2),
+                    wf=_fmt_float(s.welfare_final, 4),
+                    td=task_deg,
+                )
+            )
+        else:
+            lines.append(
+                "| {arm} | {n} | {tau} | {sid} | {sida} | {vr} | {va} | {wf} | {td} | {log} |\n".format(
+                    arm=s.arm,
+                    n=s.n_steps,
+                    tau=_fmt_float(s.tau, 3),
+                    sid=_fmt_mean_std(s.s_id01_mean, s.s_id01_std, 6),
+                    sida=_fmt_mean_std(s.s_id_anchor_mean, s.s_id_anchor_std, 6),
+                    vr=_fmt_float(s.violation_rate, 4),
+                    va=_fmt_float(s.violation_auc, 2),
+                    wf=_fmt_float(s.welfare_final, 4),
+                    td=task_deg,
+                    log=s.log_path.as_posix(),
+                )
+            )
 
     out_path.write_text("".join(lines), encoding="utf-8")
+
 
 
 def _write_drift_csv(run_dir: Path, arm: str, out_csv: Path) -> None:
@@ -188,6 +213,9 @@ def main() -> None:
         default="A3",
         help="Which arm to export drift CSV for (default: A3). Set empty to disable.",
     )
+    
+    ap.add_argument("--clean", action="store_true", help="Write paper-ready table (no log_path column).")
+
     args = ap.parse_args()
 
     run_dir = Path(args.run)
@@ -224,7 +252,8 @@ def main() -> None:
             print(f"[WARN] Could not summarize {arm}: {e}")
 
     out_md = run_dir / "summary_table.md"
-    _write_markdown_table(out_md, summaries)
+    _write_markdown_table(out_md, summaries, clean=args.clean)
+
     print(f"OK: wrote {out_md}")
 
     drift_arm = args.drift_arm.strip()
