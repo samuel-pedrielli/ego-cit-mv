@@ -2,13 +2,10 @@
 train_heads.py (v0 smoke)
 
 Minimal training smoke to verify gradients flow through probe heads:
-- Backbone frozen
-- Train probe heads (and any small projection layers) to pull a^(1) toward offline anchor mu_align
+- Backbone frozen AND kept in eval() (Gemma3 requires token_type_ids when training)
+- Train probe heads to pull a^(1) toward offline anchor mu_align
 - Loss: L_self only (IdentityStabilityLoss / MSE)
 - Logs: loss + S_id_anchor01 over steps
-
-This is intentionally not the full Forge–Anchor–Preserve schedule yet.
-It is a "does learning happen?" diagnostic.
 """
 
 from __future__ import annotations
@@ -61,27 +58,24 @@ def write_jsonl(path: Path, row: Dict[str, Any]) -> None:
         f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
-def freeze_backbone(model: CITModel) -> None:
-    # Freeze everything first
+def freeze_backbone_unfreeze_heads(model: CITModel) -> None:
+    # Freeze everything
     for p in model.parameters():
         p.requires_grad_(False)
 
-    # Unfreeze probe heads (and any small projections) explicitly.
-    # We assume CITModel exposes probe_heads.
+    # Unfreeze probe heads explicitly
     if hasattr(model, "probe_heads"):
         for head in model.probe_heads:
             for p in head.parameters():
                 p.requires_grad_(True)
 
-    # If CITModel has a small projection/aggregator layer, try common attribute names
-    for name in ["agg", "aggregator", "proj", "projection", "W_cat"]:
-        if hasattr(model, name):
-            mod = getattr(model, name)
-            try:
-                for p in mod.parameters():
-                    p.requires_grad_(True)
-            except Exception:
-                pass
+
+def set_backbone_eval_heads_train(model: CITModel) -> None:
+    # IMPORTANT: keep backbone eval (Gemma3 requires token_type_ids when training)
+    model.eval()
+    if hasattr(model, "probe_heads"):
+        for head in model.probe_heads:
+            head.train()
 
 
 def main() -> None:
@@ -89,7 +83,7 @@ def main() -> None:
     ap.add_argument("--model", default="configs/gemma3_4b_cpu.yaml", help="Model YAML config")
     ap.add_argument("--anchor", default="artifacts/anchor_real_v0.pt", help="Anchor .pt path (mu_align)")
     ap.add_argument("--prompts", default="prompts/anchor_prompts_v0.jsonl", help="JSONL prompts file")
-    ap.add_argument("--steps", type=int, default=50, help="Training steps")
+    ap.add_argument("--steps", type=int, default=20, help="Training steps (start small)")
     ap.add_argument("--lr", type=float, default=1e-3, help="Learning rate for heads")
     ap.add_argument("--max_length", type=int, default=256, help="Tokenizer max_length")
     ap.add_argument("--out", default="results/train_heads_smoke", help="Output dir")
@@ -121,12 +115,13 @@ def main() -> None:
         use_mlp_heads=use_mlp,
     ).to(device)
 
-    # Pad token safeguard (also useful here)
+    # Pad token safeguard
     if model.tokenizer.pad_token is None:
         model.tokenizer.pad_token = model.tokenizer.eos_token
 
     # Freeze backbone + unfreeze heads
-    freeze_backbone(model)
+    freeze_backbone_unfreeze_heads(model)
+    set_backbone_eval_heads_train(model)
 
     # Optimizer over trainable params only
     trainable = [p for p in model.parameters() if p.requires_grad]
@@ -137,22 +132,6 @@ def main() -> None:
     loss_fn = IdentityStabilityLoss(mu_c=1.0)
 
     prompts = load_prompts_jsonl(Path(args.prompts))
-
-    # Training loop (batch_size=1 to avoid padding overhead on CPU)
-# Keep frozen backbone in eval (Gemma3 requires token_type_ids when training)
-model.eval()
-
-# Train only the probe heads (and small projection layers if present)
-if hasattr(model, "probe_heads"):
-    for head in model.probe_heads:
-        head.train()
-for name in ["agg", "aggregator", "proj", "projection", "W_cat"]:
-    if hasattr(model, name):
-        try:
-            getattr(model, name).train()
-        except Exception:
-            pass
-
     mu_b = mu.to(device).unsqueeze(0)  # [1,d]
 
     for step in range(1, args.steps + 1):
@@ -173,7 +152,6 @@ for name in ["agg", "aggregator", "proj", "projection", "W_cat"]:
         if a1 is None:
             raise RuntimeError("Model did not return a1. Check tap_layers / probe heads.")
 
-        # L_self: pull a1 toward offline anchor mu_align
         loss = loss_fn(a1, mu_b.expand_as(a1))
 
         opt.zero_grad(set_to_none=True)
@@ -198,25 +176,6 @@ for name in ["agg", "aggregator", "proj", "projection", "W_cat"]:
         if step == 1 or step % 10 == 0:
             print(f"[{step}/{args.steps}] loss_self={loss.item():.6f} S_id_anchor01={sid_anchor:.6f}")
 
-    # Save head weights (do not commit; artifacts/ is gitignored)
-    save_path = Path("artifacts") / "heads_lself_smoke.pt"
-    save_path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(
-        {
-            "state_dict": model.state_dict(),
-            "meta": {
-                "timestamp": now_ts(),
-                "model": model_name,
-                "tap_layers": tap_layers,
-                "pooling": pooling,
-                "steps": args.steps,
-                "lr": args.lr,
-                "anchor": args.anchor,
-            },
-        },
-        save_path,
-    )
-    print(f"Saved head checkpoint to: {save_path}")
     print(f"Log written to: {log_path}")
 
 
