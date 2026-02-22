@@ -177,6 +177,25 @@ def main() -> None:
             print(f"[{step}/{args.steps}] loss_self={loss.item():.6f} S_id_anchor01={sid_anchor:.6f}")
 
     print(f"Log written to: {log_path}")
+    # Save trained head weights (probe heads only) — artifacts/ is gitignored
+    save_path = Path("artifacts") / "heads_lself_smoke.pt"
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+
+    payload = {
+        "probe_heads": [h.state_dict() for h in model.probe_heads] if hasattr(model, "probe_heads") else [],
+        "meta": {
+            "timestamp": now_ts(),
+            "model": model_name,
+            "tap_layers": tap_layers,
+            "pooling": pooling,
+            "steps": args.steps,
+            "lr": args.lr,
+            "anchor": args.anchor,
+            "out": str(out_dir),
+        },
+    }
+    torch.save(payload, save_path)
+    print(f"Saved heads to: {save_path}")
 
 
 if __name__ == "__main__":
