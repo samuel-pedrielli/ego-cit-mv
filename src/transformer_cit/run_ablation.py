@@ -207,17 +207,17 @@ def run_arm(
         use_mlp_heads=use_mlp_heads,
     ).to(device)
 
-# Optional: load trained probe heads (from train_heads.py)
-if heads_path is not None and heads_path.exists():
-    ckpt = torch.load(str(heads_path), map_location=device)
-    heads_sd = ckpt.get("probe_heads", [])
-    if hasattr(model, "probe_heads") and heads_sd:
-        n = min(len(model.probe_heads), len(heads_sd))
-        for i in range(n):
-            model.probe_heads[i].load_state_dict(heads_sd[i])
-        print(f"[INFO] Loaded {n} probe head(s) from: {heads_path}")
-    else:
-        print(f"[WARN] No probe_heads found in checkpoint or model: {heads_path}")
+    # Optional: load trained probe heads (from train_heads.py)
+    if heads_path is not None and heads_path.exists():
+        ckpt = torch.load(str(heads_path), map_location=device)
+        heads_sd = ckpt.get("probe_heads", [])
+        if hasattr(model, "probe_heads") and heads_sd:
+            n = min(len(model.probe_heads), len(heads_sd))
+            for i in range(n):
+                model.probe_heads[i].load_state_dict(heads_sd[i])
+            print(f"[INFO] Loaded {n} probe head(s) from: {heads_path}")
+        else:
+            print(f"[WARN] No probe_heads found in checkpoint or model: {heads_path}")
 
     prev_a: Dict[str, torch.Tensor] = {}
     s_id_hist: List[float] = []
