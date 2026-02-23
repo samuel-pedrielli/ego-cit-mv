@@ -1,11 +1,11 @@
 """
-train_heads.py (v0 smoke)
+train_heads.py (v0.2)
 
-Minimal training smoke to verify gradients flow through probe heads:
+Training smoke to verify gradients flow through probe heads:
 - Backbone frozen AND kept in eval() (Gemma3 requires token_type_ids when training)
-- Train probe heads to pull a^(1) toward offline anchor mu_align
-- Loss: L_self only (IdentityStabilityLoss / MSE)
-- Logs: loss + S_id_anchor01 over steps
+- Train probe heads to pull a^(1) toward offline anchor mu_align (L_self)
+- Optional: temporal consistency loss (L_id): a1_t ~= a1_{t-1}
+- Saves probe head checkpoint to artifacts/ (gitignored)
 """
 
 from __future__ import annotations
@@ -87,6 +87,11 @@ def main() -> None:
     ap.add_argument("--lr", type=float, default=1e-3, help="Learning rate for heads")
     ap.add_argument("--max_length", type=int, default=256, help="Tokenizer max_length")
     ap.add_argument("--out", default="results/train_heads_smoke", help="Output dir")
+
+    # L_id options
+    ap.add_argument("--use_lid", action="store_true", help="Enable L_id (temporal consistency: a1_t ~ a1_{t-1})")
+    ap.add_argument("--lambda_id", type=float, default=0.1, help="Weight for L_id when enabled")
+
     args = ap.parse_args()
 
     cfg = load_yaml(Path(args.model))
@@ -134,6 +139,8 @@ def main() -> None:
     prompts = load_prompts_jsonl(Path(args.prompts))
     mu_b = mu.to(device).unsqueeze(0)  # [1,d]
 
+    prev_a1 = None
+
     for step in range(1, args.steps + 1):
         prompt = prompts[(step - 1) % len(prompts)]
 
@@ -152,18 +159,28 @@ def main() -> None:
         if a1 is None:
             raise RuntimeError("Model did not return a1. Check tap_layers / probe heads.")
 
-        loss = loss_fn(a1, mu_b.expand_as(a1))
+        loss_self = loss_fn(a1, mu_b.expand_as(a1))
+
+        loss_id = torch.tensor(0.0, device=device)
+        if args.use_lid and prev_a1 is not None:
+            loss_id = F.mse_loss(a1, prev_a1)
+
+        loss = loss_self + (args.lambda_id * loss_id)
 
         opt.zero_grad(set_to_none=True)
         loss.backward()
         opt.step()
 
         sid_anchor = float(cosine01(a1.detach(), mu_b.expand_as(a1)).mean().item())
+        prev_a1 = a1.detach()
 
         row = {
             "timestamp": now_ts(),
             "step": step,
-            "loss_self": float(loss.item()),
+            "loss_self": float(loss_self.item()),
+            "loss_id": float(loss_id.item()),
+            "use_lid": bool(args.use_lid),
+            "lambda_id": float(args.lambda_id),
             "S_id_anchor01": sid_anchor,
             "lr": args.lr,
             "anchor_path": args.anchor,
@@ -174,11 +191,15 @@ def main() -> None:
         write_jsonl(log_path, row)
 
         if step == 1 or step % 10 == 0:
-            print(f"[{step}/{args.steps}] loss_self={loss.item():.6f} S_id_anchor01={sid_anchor:.6f}")
+            print(
+                f"[{step}/{args.steps}] loss_self={loss_self.item():.6f} "
+                f"loss_id={loss_id.item():.6f} S_id_anchor01={sid_anchor:.6f}"
+            )
 
     print(f"Log written to: {log_path}")
+
     # Save trained head weights (probe heads only) — artifacts/ is gitignored
-    save_path = Path("artifacts") / "heads_lself_smoke.pt"
+    save_path = Path("artifacts") / "heads_lself_lid_smoke.pt"
     save_path.parent.mkdir(parents=True, exist_ok=True)
 
     payload = {
@@ -191,6 +212,8 @@ def main() -> None:
             "steps": args.steps,
             "lr": args.lr,
             "anchor": args.anchor,
+            "use_lid": bool(args.use_lid),
+            "lambda_id": float(args.lambda_id),
             "out": str(out_dir),
         },
     }
