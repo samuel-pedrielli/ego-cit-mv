@@ -142,7 +142,13 @@ def main() -> None:
     prev_a1 = None
 
     for step in range(1, args.steps + 1):
-        prompt = prompts[(step - 1) % len(prompts)]
+        # L_id makes sense only across consecutive ticks of the same context.
+        # When enabled, repeat each prompt for 2 steps: (1,2), (3,4), ...
+        if args.use_lid:
+            prompt_idx = ((step - 1) // 2) % len(prompts)
+        else:
+            prompt_idx = (step - 1) % len(prompts)
+        prompt = prompts[prompt_idx]
 
         tok = model.tokenizer(
             prompt,
