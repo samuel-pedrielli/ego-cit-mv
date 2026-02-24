@@ -168,7 +168,11 @@ def main() -> None:
         loss_self = loss_fn(a1, mu_b.expand_as(a1))
 
         loss_id = torch.tensor(0.0, device=device)
-        if args.use_lid and prev_a1 is not None:
+
+        # L_id should compare consecutive ticks of the SAME context.
+        # With pair-repeat mode, that is true only on even steps: (1,2), (3,4), ...
+        lid_active_this_step = bool(args.use_lid and prev_a1 is not None and (step % 2 == 0))
+        if lid_active_this_step:
             loss_id = F.mse_loss(a1, prev_a1)
 
         loss = loss_self + (args.lambda_id * loss_id)
@@ -186,6 +190,7 @@ def main() -> None:
             "loss_self": float(loss_self.item()),
             "loss_id": float(loss_id.item()),
             "use_lid": bool(args.use_lid),
+            "lid_active_this_step": bool(lid_active_this_step),
             "lambda_id": float(args.lambda_id),
             "S_id_anchor01": sid_anchor,
             "lr": args.lr,
