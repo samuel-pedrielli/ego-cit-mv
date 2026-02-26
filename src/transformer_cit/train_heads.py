@@ -85,6 +85,7 @@ def main() -> None:
     ap.add_argument("--prompts", default="prompts/anchor_prompts_v0.jsonl", help="JSONL prompts file")
     ap.add_argument("--steps", type=int, default=20, help="Training steps (start small)")
     ap.add_argument("--lr", type=float, default=1e-3, help="Learning rate for heads")
+    ap.add_argument("--seed", type=int, default=123, help="Random seed")
     ap.add_argument("--max_length", type=int, default=256, help="Tokenizer max_length")
     ap.add_argument("--out", default="results/train_heads_smoke", help="Output dir")
 
@@ -93,6 +94,7 @@ def main() -> None:
     ap.add_argument("--lambda_id", type=float, default=0.1, help="Weight for L_id when enabled")
 
     args = ap.parse_args()
+    torch.manual_seed(args.seed)
 
     cfg = load_yaml(Path(args.model))
 

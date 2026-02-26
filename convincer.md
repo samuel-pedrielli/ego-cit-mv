@@ -232,3 +232,16 @@ python src/mv_cit_toy.py
 ```
 
 Environment: Python 3.10+, PyTorch 2.x, HuggingFace Transformers. No GPU required for PoC (CPU training with frozen backbone).
+
+## Ablation: L_id in heads-only regime (matched budget)
+
+Setup: frozen backbone (Gemma3-4B), probe heads only, real anchor `artifacts/anchor_real_v0.pt`.
+Matched training budget: steps=50, lr=1e-3, seed=123.
+Eval: `run_ablation` arm A3 (tau=0.6, n_steps=12).
+
+| heads training | S_id_anchor01 (mean +/- std) |
+|---|---:|
+| L_self-only | 0.997962 +/- 0.000194 |
+| L_self + L_id (default lambda_id) | 0.996656 +/- 0.001009 |
+
+Observation: at this setting, adding L_id slightly lowers mean anchor alignment and increases variance (~5.2x std). This suggests anchor pull dominates temporal consistency in the heads-only regime. We therefore treat L_id as optional/deprioritized and focus on critics + L_CIT (constitutional forging), which is the key qualitative capability under adversarial pressure.
