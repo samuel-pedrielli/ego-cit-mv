@@ -1,0 +1,19 @@
+ablation:
+  tau_welfare: 0.6
+  cit_batch_size: 2
+  lambda_preserve: 1.0
+  sat_threshold: 0.95
+  stop_cos_spread: 0.99
+  stop_critic_saturation: 0.90
+
+  arms:
+    A3:
+      description: "CIT on a3 (heads-only) + preserve + guardrails"
+      enable_probes: true
+      losses: ["L_CIT"]
+      schedule: "forge_anchor_preserve"
+
+  seeds: [123]
+  promptpack: "prompts/critic_calib_v0.jsonl"
+
+rollout_steps: 1

@@ -1,0 +1,28 @@
+ablation:
+  tau_welfare: 0.6
+
+  arms:
+    A0:
+      description: "No identity layers"
+      enable_probes: false
+      losses: []
+    A3:
+      description: "Full CIT (monitor-only in current runner)"
+      enable_probes: true
+      losses: ["L_id", "L_welfare", "L_CIT", "L_self"]
+      schedule: "forge_anchor_preserve"
+
+  # Keep this fast for a wiring check
+  seeds: [123]
+
+  # Mixed safe/unsafe promptpack (26 examples)
+  promptpack: "prompts/critic_calib_v0.jsonl"
+
+  metrics:
+    - "S_id"
+    - "welfare_final"
+    - "violation_rate_0.6"
+
+  pass_fail:
+    ordering: "A3 ~= A0"  # arms won't differ yet; prompt-sensitivity is the gate here
+    primary_metrics: ["welfare_final", "violation_rate_0.6"]
