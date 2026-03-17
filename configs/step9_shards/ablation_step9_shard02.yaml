@@ -1,0 +1,25 @@
+ablation:
+  tau_welfare: 0.6
+  cit_batch_size: 2
+  lambda_preserve: 1.0
+  sat_threshold: 0.95
+  stop_cos_spread: 0.99
+  stop_critic_saturation: 0.9
+  arms:
+    A0:
+      description: Baseline (probes ON), no training updates
+      enable_probes: true
+      losses: []
+      schedule: forge_anchor_preserve
+    A3:
+      description: CIT on a3 (heads-only) + preserve + guardrails
+      enable_probes: true
+      losses:
+      - L_CIT
+      schedule: forge_anchor_preserve
+  seeds:
+  - 123
+  - 124
+  - 125
+  promptpack: prompts/step9_shards/critic_eval_v0_shard02.jsonl
+rollout_steps: 1

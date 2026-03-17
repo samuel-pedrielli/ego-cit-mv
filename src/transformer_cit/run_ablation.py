@@ -1,18 +1,22 @@
 """
-run_ablation.py (v0.1)
+run_ablation.py (v0.2 — consolidated)
 
-Runner skeleton aligned to current repo modules:
+Runner for CIT ablation experiments. Aligned to:
 - model.py: CITModel
 - critics.py: CriticEnsemble
-- losses.py: IdentityLoss, IdentityStabilityLoss, WelfareLoss, CITLoss
+- losses.py: CITLoss (direct optimization)
 - schedule.py: FAPConfig, ForgeAnchorPreserve
 
-It supports:
-- ablation config: configs/ablation_v0.yaml
-- model config: configs/gemma3_4b_cpu.yaml
-- logging JSONL + summary TXT
+Features:
+- Epoch-based training loop (uniform gradient distribution)
+- Gradient clipping (max_grad_norm from ablation config)
+- Diagnostic logging (preserve_raw, grad_norm_before_clip)
+- Post-hoc evaluation (trained vs reference heads, B=1 per prompt)
+- Ablation config: configs/step9_shards/ablation_step9_*_optC.yaml
+- Model config: configs/gemma3_4b_cpu_tau09_lr4.yaml
 
-NOTE: This is still "monitor + plumbing" (no optimizer/training yet).
+Consolidated from patches A (diagnostics), C (direct CIT loss),
+D (post-hoc eval), E (epoch-based loop).
 """
 
 from __future__ import annotations
@@ -144,6 +148,7 @@ def run_arm(
     sat_threshold = float(ab_cfg.get("ablation", {}).get("sat_threshold", 0.95))
     stop_cos_spread = float(ab_cfg.get("ablation", {}).get("stop_cos_spread", 0.99))
     stop_critic_saturation = float(ab_cfg.get("ablation", {}).get("stop_critic_saturation", 0.90))
+    max_grad_norm = float(ab_cfg.get("ablation", {}).get("max_grad_norm", 0.0))
 
     tau_crit = float(m_cfg.get("cit", {}).get("tau_crit", 0.7))
     eps_cit = float(m_cfg.get("cit", {}).get("epsilon", 0.01))
@@ -277,8 +282,8 @@ def run_arm(
     viol_hist: List[float] = []
     step = 0
 
-    for task in tasks:
-        for t in range(rollout_steps):
+    for t in range(rollout_steps):
+        for task in tasks:
             step += 1
 
             # Phase transition
@@ -353,6 +358,8 @@ def run_arm(
             cos_spread = None
             critic_saturation = None
             did_update = False
+            preserve_raw = 0.0
+            grad_norm_before_clip = 0.0
 
             if "L_id" in losses_enabled and prev_a and out:
                 loss_id = L_id(out, prev_a) * weights.get("lambda_id", 0.0)
@@ -400,9 +407,17 @@ def run_arm(
                 else:
                     loss_c = L_cit(a_crit, critics) * lambda_cit_eff
                     loss_preserve = lambda_preserve * (a_crit - a_nat.detach()).pow(2).sum(dim=-1).mean()
+                    preserve_raw = float((a_crit - a_nat.detach()).pow(2).sum(dim=-1).mean().item())
                     loss_update = loss_c + loss_preserve
                     opt_heads.zero_grad(set_to_none=True)
                     loss_update.backward()
+                    # Diagnostic: grad norm before clipping
+                    grad_norm_before_clip = float(
+                        torch.nn.utils.clip_grad_norm_(trainable_heads, float('inf')).item()
+                    ) if trainable_heads else 0.0
+                    # Gradient clipping
+                    if max_grad_norm > 0 and trainable_heads:
+                        torch.nn.utils.clip_grad_norm_(trainable_heads, max_grad_norm)
                     opt_heads.step()
                     did_update = True
 
@@ -430,6 +445,9 @@ def run_arm(
                 "cos_spread": cos_spread,
                 "critic_saturation": critic_saturation,
                 "did_update": did_update,
+                "preserve_raw": preserve_raw,
+                "grad_norm_before_clip": grad_norm_before_clip,
+                "max_grad_norm": max_grad_norm,
                 "a_key_used": a_key,
                 "lambda_cit_eff": lambda_cit_eff,
                 "opt_heads_active": (opt_heads is not None),
@@ -446,6 +464,125 @@ def run_arm(
                 break
 
         sched.advance()
+
+
+    # ============================================================
+    # POST-HOC EVALUATION (Patch D — Option C)
+    # ============================================================
+    # Clean measurement: evaluate ALL prompts with final heads,
+    # then with reference (untrained) heads.  B=1 per prompt for
+    # uncontaminated per-prompt welfare.
+    # ============================================================
+    posthoc_path = out_dir / f"{arm_id.lower()}_posthoc.jsonl"
+    posthoc_summary_path = out_dir / f"{arm_id.lower()}_posthoc_summary.txt"
+    print(f"[INFO] Post-hoc evaluation: {len(tasks)} prompts (B=1 each)...")
+
+    posthoc_welfare_trained = []
+    posthoc_welfare_ref = []
+    posthoc_deltas = []
+
+    with torch.no_grad():
+        for eval_idx, task in enumerate(tasks):
+            # --- Forward with CURRENT (trained for A3, unchanged for A0) heads ---
+            tok_ph = model.tokenizer(
+                [task.prompt],
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=int(m_cfg.get("cit", {}).get("max_length", 256)),
+            )
+            ids_ph = tok_ph["input_ids"].to(device)
+            mask_ph = tok_ph.get("attention_mask", torch.ones_like(ids_ph)).to(device)
+
+            out_ph = model(input_ids=ids_ph, attention_mask=mask_ph)
+            a_crit_ph = out_ph.get(a_key, None)
+
+            if a_crit_ph is not None:
+                cr_out = critics(a_crit_ph)
+                w_trained = float(cr_out["aggregate"].item())
+                pr_trained = cr_out["per_rule"].squeeze(0).tolist()
+            else:
+                w_trained = float("nan")
+                pr_trained = []
+
+            # --- Forward with REFERENCE (untrained) heads ---
+            w_ref = w_trained  # default if no ref available
+            pr_ref = pr_trained
+            if ref_heads_sd is not None and hasattr(model, "probe_heads"):
+                # Save current (trained) heads
+                cur_sd_ph = [
+                    {k: v.detach().cpu().clone() for k, v in ph.state_dict().items()}
+                    for ph in model.probe_heads
+                ]
+                n_ph = min(len(model.probe_heads), len(ref_heads_sd))
+                # Load reference (untrained) heads
+                for i in range(n_ph):
+                    model.probe_heads[i].load_state_dict(ref_heads_sd[i])
+
+                out_ref_ph = model(input_ids=ids_ph, attention_mask=mask_ph)
+                a_crit_ref_ph = out_ref_ph.get(a_key, None)
+
+                if a_crit_ref_ph is not None:
+                    cr_ref = critics(a_crit_ref_ph)
+                    w_ref = float(cr_ref["aggregate"].item())
+                    pr_ref = cr_ref["per_rule"].squeeze(0).tolist()
+
+                # Restore trained heads
+                for i in range(n_ph):
+                    model.probe_heads[i].load_state_dict(cur_sd_ph[i])
+
+            delta = w_trained - w_ref
+            posthoc_welfare_trained.append(w_trained)
+            posthoc_welfare_ref.append(w_ref)
+            posthoc_deltas.append(delta)
+
+            row_ph = {
+                "task_id": task.task_id,
+                "eval_idx": eval_idx,
+                "welfare_trained": round(w_trained, 6),
+                "welfare_ref": round(w_ref, 6),
+                "delta": round(delta, 6),
+                "per_rule_trained": [round(x, 4) for x in pr_trained],
+                "per_rule_ref": [round(x, 4) for x in pr_ref],
+            }
+            write_jsonl(posthoc_path, row_ph)
+
+    # Post-hoc summary
+    import statistics
+    n_ph_total = len(posthoc_deltas)
+    n_improved = sum(1 for d in posthoc_deltas if d > 0.001)
+    n_degraded = sum(1 for d in posthoc_deltas if d < -0.001)
+    n_neutral = n_ph_total - n_improved - n_degraded
+
+    ph_summary_lines = [
+        f"arm: {arm_id}",
+        f"posthoc_n: {n_ph_total}",
+        f"",
+        f"welfare_trained_avg: {statistics.mean(posthoc_welfare_trained):.6f}",
+        f"welfare_trained_min: {min(posthoc_welfare_trained):.6f}",
+        f"welfare_trained_max: {max(posthoc_welfare_trained):.6f}",
+        f"welfare_trained_below09: {sum(1 for w in posthoc_welfare_trained if w < 0.9)}",
+        f"",
+        f"welfare_ref_avg: {statistics.mean(posthoc_welfare_ref):.6f}",
+        f"welfare_ref_min: {min(posthoc_welfare_ref):.6f}",
+        f"welfare_ref_max: {max(posthoc_welfare_ref):.6f}",
+        f"welfare_ref_below09: {sum(1 for w in posthoc_welfare_ref if w < 0.9)}",
+        f"",
+        f"delta_avg: {statistics.mean(posthoc_deltas):.6f}",
+        f"delta_min: {min(posthoc_deltas):.6f}",
+        f"delta_max: {max(posthoc_deltas):.6f}",
+        f"delta_stdev: {statistics.stdev(posthoc_deltas) if n_ph_total > 1 else 0:.6f}",
+        f"",
+        f"n_improved: {n_improved}  (delta > +0.001)",
+        f"n_degraded: {n_degraded}  (delta < -0.001)",
+        f"n_neutral:  {n_neutral}",
+    ]
+    with posthoc_summary_path.open("w", encoding="utf-8") as f_ph:
+        f_ph.write("\n".join(ph_summary_lines) + "\n")
+    print(f"[INFO] Post-hoc summary: {posthoc_summary_path}")
+    for line in ph_summary_lines:
+        if line:
+            print(f"  {line}")
 
     mean_s = sum(s_id_hist) / len(s_id_hist) if s_id_hist else float("nan")
     mean_v = sum(viol_hist) / len(viol_hist) if viol_hist else float("nan")
@@ -503,9 +640,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
-# PATCH_STEP8_V3_APPLIED
-
-# PATCH_STEP8_MEMFIX_APPLIED
-
-# PATCH_STEP8_DEBUG_LAMBDA_APPLIED
