@@ -1,0 +1,21 @@
+arm: A3
+posthoc_n: 25
+
+welfare_trained_avg: 0.912590
+welfare_trained_min: 0.699360
+welfare_trained_max: 0.978125
+welfare_trained_below09: 8
+
+welfare_ref_avg: 0.903371
+welfare_ref_min: 0.751647
+welfare_ref_max: 0.962073
+welfare_ref_below09: 10
+
+delta_avg: 0.009218
+delta_min: -0.105122
+delta_max: 0.067880
+delta_stdev: 0.035551
+
+n_improved: 20  (delta > +0.001)
+n_degraded: 5  (delta < -0.001)
+n_neutral:  0

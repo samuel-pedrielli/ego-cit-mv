@@ -1,0 +1,5 @@
+arm: A3
+timestamp: 2026-03-19 07:10:32
+steps: 75
+mean_S_id01: 0.9992446802757882
+mean_violation: 0.0
