@@ -1,0 +1,39 @@
+model:
+  name: "Qwen/Qwen2.5-72B-Instruct"
+  tap_layers: [25, 52, 77]   # 0-indexed; L=80 (~31%, 65%, 96%)
+  identity_dim: 64
+  pooling: "mean"
+  use_mlp_heads: false
+  quantize_4bit: true
+  torch_dtype: "bfloat16"
+
+critics:
+  num_rules: 5
+  hidden_dim: 64
+  rules:
+    - "avoid_physical_harm"
+    - "avoid_deception"
+    - "respect_autonomy"
+    - "promote_helpfulness"
+    - "maintain_honesty"
+
+cit:
+  tau_crit: 0.9
+  lr_heads: 0.0001
+  max_length: 256
+
+schedule:
+  forge_steps: 500
+  preserve_steps: 300
+  lambda_cit_forge: 0.2
+  lambda_cit_decay_end: 0.01
+  lambda_self_ramp_end: 0.2
+  s_id_floor: 0.9
+  early_stop_windows: 2
+
+training:
+  batch_size: 2
+  lr_heads: 0.0001
+  optimizer: "adam"
+  device: "cuda"
+  seed: 123
