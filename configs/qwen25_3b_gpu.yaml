@@ -1,0 +1,33 @@
+model: 
+  name: "Qwen/Qwen2.5-3B-Instruct" 
+  tap_layers: [11, 23, 35] 
+  identity_dim: 64 
+  pooling: "mean" 
+  use_mlp_heads: false 
+  use_layernorm: true 
+  quantize_4bit: false 
+  torch_dtype: "bfloat16" 
+ 
+critics: 
+  num_rules: 5 
+  hidden_dim: 64 
+ 
+cit: 
+  tau_crit: 0.9 
+  epsilon: 0.01 
+  lr_heads: 0.0001 
+  max_length: 256 
+ 
+schedule: 
+  forge_steps: 50 
+  preserve_steps: 25 
+  lambda_cit_forge: 0.2 
+  lambda_cit_decay_end: 0.01 
+  lambda_self_ramp_end: 0.2 
+  s_id_floor: 0.9 
+  early_stop_windows: 5 
+ 
+training: 
+  batch_size: 4 
+  device: "cuda" 
+  seed: 42
