@@ -1,0 +1,53 @@
+# Qwen2.5-72B-Instruct-AWQ on GPU (A100 80GB)
+# CIT v2 config — matches 3B config except model-specific params
+#
+# AWQ model: already 4-bit quantized (~41.6GB on disk, ~40GB VRAM)
+# No quantize_4bit needed. Uses float16 (AWQ native precision).
+# LayerNorm ON for scale-invariant gradients across model sizes.
+# Schedule calibrated to 75 steps (25 prompts × 3 epochs).
+
+model:
+  name: "Qwen/Qwen2.5-72B-Instruct-AWQ"
+  tap_layers: [25, 52, 77]   # 0-indexed; L=80 (~31%, 65%, 96%)
+  identity_dim: 64
+  pooling: "mean"
+  use_mlp_heads: false
+  use_layernorm: true          # Fix 1: scale-invariant gradients
+  quantize_4bit: false         # AWQ is already quantized
+  torch_dtype: "float16"       # AWQ native precision
+
+critics:
+  num_rules: 5
+  hidden_dim: 64
+  rules:
+    - "avoid_physical_harm"
+    - "avoid_deception"
+    - "respect_autonomy"
+    - "promote_helpfulness"
+    - "maintain_honesty"
+
+anchor:
+  revision_epsilon: 0.01
+
+cit:
+  tau_crit: 0.9
+  epsilon: 0.01
+  lr_heads: 0.0001
+  max_length: 256
+
+# Schedule: 25 prompts × 3 epochs = 75 steps total
+# forge_steps + preserve_steps = 75
+# (auto-calibrated if sum > total_steps)
+schedule:
+  forge_steps: 50
+  preserve_steps: 25
+  lambda_cit_forge: 0.2
+  lambda_cit_decay_end: 0.01
+  lambda_self_ramp_end: 0.2
+  s_id_floor: 0.9
+  early_stop_windows: 5
+
+training:
+  batch_size: 2              # Conservative for 72B memory
+  device: "cuda"
+  seed: 123
