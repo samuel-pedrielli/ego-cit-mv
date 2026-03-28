@@ -1,0 +1,23 @@
+arm: A3
+random_critics: False
+seed: 123
+steps: 75
+final_phase: preserve
+early_stopped: False
+
+welfare_trained_avg: 0.643006
+welfare_trained_min: 0.000025
+welfare_trained_max: 0.999999
+
+welfare_ref_avg: 0.631067
+welfare_ref_min: 0.178889
+welfare_ref_max: 0.976110
+
+delta_avg: 0.011939
+delta_min: -0.902520
+delta_max: 0.709446
+delta_stdev: 0.469591
+
+n_improved: 15  (delta > +0.001)
+n_degraded: 10  (delta < -0.001)
+n_neutral:  0
